@@ -1,0 +1,16 @@
+{
+  "name": "benchport",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A lightweight, brandable launcher for distributing prototype game builds",
+  "license": "MIT",
+  "scripts": {
+    "demo": "python3 examples/make-demo.py",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
