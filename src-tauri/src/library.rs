@@ -38,6 +38,39 @@ pub struct LibraryEntry {
     /// Older builds kept by `keep_versions`, newest first.
     #[serde(default)]
     pub kept: Vec<Installed>,
+    /// The catalog entry as last seen (the UI's GameView), so the game still
+    /// has its art, description and kind if it's removed from the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<serde_json::Value>,
+    /// How many older builds to keep at most (`None` = no limit).
+    #[serde(default = "default_keep_limit")]
+    pub keep_limit: Option<u32>,
+}
+
+pub const DEFAULT_KEEP_LIMIT: u32 = 3;
+
+fn default_keep_limit() -> Option<u32> {
+    Some(DEFAULT_KEEP_LIMIT)
+}
+
+impl LibraryEntry {
+    /// Drop kept builds beyond `keep_limit` (oldest first), never touching
+    /// `protect` (a build that's currently playing). Returns the removed ones
+    /// so the caller can delete their files.
+    pub fn prune_kept(&mut self, protect: Option<&str>) -> Vec<Installed> {
+        let Some(limit) = self.keep_limit else { return Vec::new() };
+        let mut over = self.kept.len().saturating_sub(limit as usize);
+        let mut removed = Vec::new();
+        let mut i = self.kept.len();
+        while over > 0 && i > 0 {
+            i -= 1;
+            if Some(self.kept[i].version.as_str()) != protect {
+                removed.push(self.kept.remove(i));
+                over -= 1;
+            }
+        }
+        removed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +128,7 @@ impl Library {
     }
 
     pub fn entry(&mut self, id: &str) -> &mut LibraryEntry {
-        self.games.entry(id.to_string()).or_insert_with(|| LibraryEntry { added_at: now(), ..Default::default() })
+        self.games.entry(id.to_string()).or_insert_with(|| LibraryEntry { added_at: now(), keep_limit: default_keep_limit(), ..Default::default() })
     }
 }
 
@@ -114,4 +147,38 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+
+    fn build(v: &str) -> Installed {
+        Installed { version: v.into(), path: PathBuf::from(v), executable: "x".into(), args: vec![], installed_at: 0, size_bytes: 0 }
+    }
+
+    #[test]
+    fn prune_drops_oldest_but_spares_the_playing_build() {
+        let mut e = LibraryEntry { keep_limit: Some(2), ..Default::default() };
+        e.kept = ["1.4", "1.3", "1.2", "1.1"].map(build).to_vec(); // newest first
+        let gone: Vec<_> = e.prune_kept(Some("1.1")).into_iter().map(|b| b.version).collect();
+        assert_eq!(gone, ["1.2", "1.3"]);
+        assert_eq!(e.kept.iter().map(|b| b.version.as_str()).collect::<Vec<_>>(), ["1.4", "1.1"]);
+
+        e.keep_limit = None;
+        e.kept.push(build("1.0"));
+        assert!(e.prune_kept(None).is_empty());
+
+        e.keep_limit = Some(1);
+        assert_eq!(e.prune_kept(None).len(), 2);
+        assert_eq!(e.kept[0].version, "1.4");
+    }
+
+    #[test]
+    fn old_library_files_get_the_default_limit() {
+        let e: LibraryEntry = serde_json::from_str("{}").unwrap();
+        assert_eq!(e.keep_limit, Some(DEFAULT_KEEP_LIMIT));
+        let e: LibraryEntry = serde_json::from_str(r#"{"keepLimit":null}"#).unwrap();
+        assert_eq!(e.keep_limit, None);
+    }
 }

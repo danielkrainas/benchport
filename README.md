@@ -221,7 +221,15 @@ show the update with a link to `page`. Debug builds never replace themselves; se
   per-game *Keep previous versions* switch. When it's on, an update moves the old build to
   `games/.versions/<id>/<version>/` instead of deleting it. The Play button then gets a ▾
   menu to choose *Latest* or any kept build, and each kept build can be played, opened or
-  deleted from the panel. Uninstalling a game removes its kept builds too.
+  deleted from the panel. *Keep up to* caps how many old builds are kept (default 3, or
+  *All versions*); the oldest are deleted past the limit, but never one that's playing.
+  *Delete all previous versions* (also in the game's ⋯ menu) clears them in one go.
+  Uninstalling a game removes its kept builds too.
+- **Games removed from the catalog:** the library keeps a snapshot of each game's catalog
+  entry (art, description, type), so a removed game still looks right. Installed and kept
+  builds stay playable but get no updates and can't be reinstalled; removed browser games
+  and never-installed games show *No longer available* with a *Remove from library*
+  button. The launcher shows a notification when a library game disappears on a refresh.
 
 ## Project layout
 

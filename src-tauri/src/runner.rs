@@ -44,7 +44,13 @@ pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
             Some(v) if !e.and_then(|e| e.installed.as_ref()).is_some_and(|i| i.version == v) => e
                 .and_then(|e| e.kept.iter().find(|k| k.version == v).cloned())
                 .ok_or_else(|| Error::msg(format!("Version {v} is not installed.")))?,
-            _ => e.and_then(|e| e.installed.clone()).ok_or_else(|| Error::msg("This game is not installed."))?,
+            _ => e.and_then(|e| e.installed.clone()).ok_or_else(|| {
+                Error::msg(if st.find_game(id).is_none() {
+                    "This game was removed from the catalog and can't be played anymore."
+                } else {
+                    "This game is not installed."
+                })
+            })?,
         }
     };
 

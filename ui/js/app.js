@@ -1,5 +1,5 @@
 import { icon } from './icons.js';
-import { S, ACTIVE_PHASES, game, status, catalogGame, updatesAvailable, featured } from './store.js';
+import { S, ACTIVE_PHASES, game, status, catalogGame, updatesAvailable, featured, entry, kept, libraryIds } from './store.js';
 import * as V from './views.js';
 import { applyTheme, esc } from './util.js';
 
@@ -218,6 +218,10 @@ async function loadLibrary(initial = false) {
   if (initial) for (const j of v.jobs) S.jobs.set(j.gameId, j);
 }
 
+// Game ids in the last catalog we compared against, to spot removals once
+// even when loads overlap. Reset when the catalog source changes.
+let listedIds = null;
+
 async function loadCatalog(refresh) {
   const before = new Set(updatesAvailable());
   S.catalogLoading = true;
@@ -231,6 +235,17 @@ async function loadCatalog(refresh) {
     S.catalogLoading = false;
   }
   scheduleRender();
+  // Tell the player when a game in their library is pulled from the catalog.
+  if (S.catalog) {
+    const listed = listedIds;
+    const now = new Set(S.catalog.games.map((g) => g.id));
+    listedIds = now;
+    for (const id of listed ? libraryIds().filter((id) => listed.has(id) && !now.has(id)) : []) {
+      const g = game(id);
+      const builds = entry(id)?.installed || kept(id).length;
+      toast({ title: `${g.name} was removed from the catalog`, sub: builds && g.kind !== 'web' ? "You can keep playing what's installed." : "It's no longer available.", g, ms: 8000 });
+    }
+  }
   // Announce new updates the user has to act on themselves.
   if (!S.library.settings.autoUpdate) {
     const fresh = updatesAvailable().filter((id) => !before.has(id));
@@ -282,7 +297,7 @@ const actions = {
     S.menuOpen = null;
     scheduleRender();
     const g = game(id);
-    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: `The game files${S.library.games[id]?.kept?.length ? ', including kept older versions,' : ''} will be deleted from this computer. It stays in your library so you can reinstall it any time.`, ok: 'Uninstall', danger: true }))) return;
+    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: `The game files${S.library.games[id]?.kept?.length ? ', including kept older versions,' : ''} will be deleted from this computer. ${g.orphan ? "This game is no longer in the catalog, so you won't be able to install it again." : 'It stays in your library so you can reinstall it any time.'}`, ok: 'Uninstall', danger: true }))) return;
     await call('uninstall_game', { id });
     toast({ title: 'Uninstalled', sub: g.name, g });
   },
@@ -317,6 +332,14 @@ const actions = {
     if (!(await confirmModal({ title: `Delete ${g?.name} v${version}?`, text: 'This older build will be removed from this computer. The current version is not affected.', ok: 'Delete', danger: true }))) return;
     await call('delete_version', { id, version });
     toast({ title: `Deleted v${version}`, sub: g?.name, g });
+  },
+  async 'delete-all-versions'({ id }) {
+    const g = game(id);
+    const n = S.library.games[id]?.kept?.length || 0;
+    if (!n) return;
+    if (!(await confirmModal({ title: `Delete ${n} previous ${n === 1 ? 'version' : 'versions'} of ${g?.name}?`, text: `${n === 1 ? 'The older build' : 'All older builds'} will be removed from this computer. The current version is not affected.`, ok: 'Delete', danger: true }))) return;
+    await call('delete_all_versions', { id });
+    toast({ title: 'Deleted previous versions', sub: g?.name, g });
   },
   async 'open-path'({ which }) {
     await call('open_path', { which });
@@ -408,6 +431,14 @@ document.addEventListener('change', (e) => {
   if (e.target.dataset.change === 'lib-sort') {
     S.libSort = e.target.value;
     render();
+  }
+  if (e.target.dataset.change === 'keep-limit') {
+    const { id } = e.target.dataset;
+    const limit = e.target.value === '' ? null : Number(e.target.value);
+    const before = S.library.games[id]?.kept?.length || 0;
+    call('set_keep_limit', { id, limit }).then(() => {
+      if (limit != null && before > limit) toast({ title: `Keeping up to ${limit} previous ${limit === 1 ? 'version' : 'versions'}`, sub: 'Older builds were deleted.', g: game(id) });
+    }).catch(() => {});
   }
 });
 
@@ -532,6 +563,7 @@ listen('launcher://update', ({ payload: u }) => {
 listen('config://changed', async () => {
   await loadConfig();
   S.catalog = null;
+  listedIds = null;
   S.news = [];
   render();
   await loadCatalog(true);

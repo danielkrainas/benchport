@@ -108,10 +108,25 @@ function versionsBlock(id) {
       </div>
     </div>`;
   if (!inst && !older.length && !e.keepVersions) return '';
+  const limit = e.keepLimit === undefined ? 3 : e.keepLimit; // null = no limit
+  const opts = [1, 2, 3, 5, 10, null]
+    .map((n) => `<option value="${n ?? ''}"${n === limit ? ' selected' : ''}>${n == null ? 'All versions' : n === 1 ? '1 version' : `${n} versions`}</option>`)
+    .join('');
+  const limitRow = e.keepVersions
+    ? `<div class="ver-limit"><div class="grow"><div class="t">Keep up to</div><div class="s">The oldest builds are deleted when there are more than this.</div></div>
+        <select class="select sm" data-change="keep-limit" ${a}>${opts}</select></div>`
+    : '';
+  const keptBytes = older.reduce((n, k) => n + (k.sizeBytes || 0), 0);
+  const footer = older.length
+    ? `<div class="ver-foot"><span>${older.length} previous ${older.length === 1 ? 'version' : 'versions'} · ${bytes(keptBytes)}</span>
+        <button class="btn sm ghost danger-h" data-action="delete-all-versions" ${a}${running ? ' disabled' : ''}>${icon('trash')} Delete all previous versions</button></div>`
+    : '';
   return `<div class="block"><h2>Installed versions</h2><div class="versions">
     <div class="ver-keep"><div class="grow"><div class="t">Keep previous versions</div><div class="s">When ${esc(g?.name || 'this game')} updates, keep the old build so you can still play it.</div></div>
       <button class="toggle${e.keepVersions ? ' on' : ''}" data-action="toggle-keep" ${a} role="switch" aria-checked="${!!e.keepVersions}"></button></div>
+    ${limitRow}
     ${inst ? row(inst, true) : ''}${older.map((k) => row(k, false)).join('')}
+    ${footer}
   </div></div>`;
 }
 
@@ -138,7 +153,7 @@ export function actionButton(id, size = '') {
     case 'unavailable':
       return `<button class="btn${sz}" disabled>Not available on ${esc(platformName(S.config?.platform))}</button>`;
     default:
-      if (g?.orphan) return `<button class="btn${sz}" disabled>Unavailable</button>`;
+      if (g?.uncatalogued) return `<button class="btn${sz}" disabled>${g.orphan ? 'No longer available' : 'Catalog unavailable'}</button>`;
       if (g?.kind === 'web') return `<button class="btn primary${sz}" data-action="add" ${a}>${icon('plus')} Add to library</button>`;
       return `<button class="btn primary${sz}" data-action="install" ${a}>${icon('download')} Install</button>`;
   }
@@ -147,7 +162,9 @@ export function actionButton(id, size = '') {
 function statusPill(id) {
   const g = game(id);
   const job = S.jobs.get(id);
-  switch (status(id)) {
+  const st = status(id);
+  if (g?.orphan && st !== 'running' && !playable(id) && !kept(id).length) return `<span class="pill muted">Removed</span>`;
+  switch (st) {
     case 'installing': return `<span class="pill dl" data-prog-pct="${esc(id)}">${job?.percent != null ? Math.floor(overallPercent(job)) + '%' : '…'}</span>`;
     case 'running': { const p = playingVersion(id); return `<span class="pill ok">Playing${p ? ` v${esc(p.version)}` : ''}</span>`; }
     case 'installed': return isWeb(id) ? `<span class="pill ok">In library</span>` : `<span class="pill ok">Installed</span>`;
@@ -484,7 +501,7 @@ export function gamePage(id) {
   const stats = [];
   if (web) {
     if (e) stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
-    stats.push(['Runs in', g.opensInBrowser ? 'Your browser' : 'The launcher']);
+    if (!g.uncatalogued) stats.push(['Runs in', g.opensInBrowser ? 'Your browser' : 'The launcher']);
   } else if (inst || pv) {
     if (pv) stats.push(['Now playing', `<span class="playing">v${esc(pv.version)}${pv.older ? ' <span class="muted">· previous build</span>' : ''}</span>`]);
     else stats.push(['Last played', ago(e.lastPlayed)]);
@@ -498,11 +515,12 @@ export function gamePage(id) {
   }
 
   const menuItems = [];
-  if (web && g.playUrl && /^https?:/i.test(g.playUrl) && !g.opensInBrowser) menuItems.push(`<button data-action="open-url" data-url="${esc(g.playUrl)}">${icon('external')} Open in browser</button>`);
+  if (web && !g.uncatalogued && g.playUrl && /^https?:/i.test(g.playUrl) && !g.opensInBrowser) menuItems.push(`<button data-action="open-url" data-url="${esc(g.playUrl)}">${icon('external')} Open in browser</button>`);
   if (st === 'update') menuItems.push(`<button data-action="play" ${a}>${icon('play')} Play installed version</button>`);
   if (inst) {
     menuItems.push(`<button data-action="open-folder" ${a}>${icon('folder')} Open install folder</button>`);
     if (!g.orphan && g.available) menuItems.push(`<button data-action="install" ${a}>${icon('refresh')} Reinstall</button>`);
+    if (kept(id).length) menuItems.push(`<button class="danger" data-action="delete-all-versions" ${a}>${icon('trash')} Delete previous versions</button>`);
     menuItems.push('<hr>', `<button class="danger" data-action="uninstall" ${a}>${icon('trash')} Uninstall</button>`);
   }
   if (e) menuItems.push(`<button class="danger" data-action="remove" ${a}>${icon('x')} Remove from library</button>`);
@@ -512,7 +530,18 @@ export function gamePage(id) {
     : '';
 
   const notices = [];
-  if (g.orphan) notices.push(`<div class="notice info">${icon('info')}<div class="grow"><div class="t">No longer in the catalog</div><div class="s">This game was removed from the catalog. You can keep playing the version you have installed.</div></div></div>`);
+  if (g.uncatalogued) {
+    const hasBuilds = !!inst || kept(id).length > 0;
+    const [t, s] = !g.orphan
+      ? ['Catalog unavailable', "The game catalog couldn't be loaded, so only what's on this computer is shown."]
+      : web
+        ? ['No longer available', `${esc(g.name)} was removed from the catalog, so it can't be played anymore.`]
+        : hasBuilds
+          ? ['No longer in the catalog', "This game was removed from the catalog. You can keep playing what's installed, but it won't get updates and can't be reinstalled once it's uninstalled."]
+          : ['No longer available', "This game was removed from the catalog, so it can't be installed anymore."];
+    const btn = g.orphan && !hasBuilds && e ? `<button class="btn sm" data-action="remove" ${a}>${icon('x')} Remove from library</button>` : '';
+    notices.push(`<div class="notice info">${icon('info')}<div class="grow"><div class="t">${t}</div><div class="s">${s}</div></div>${btn}</div>`);
+  }
   if (st === 'update') notices.push(`<div class="notice">${icon('sparkle')}<div class="grow"><div class="t">Version ${esc(g.version)} is available</div><div class="s">You have v${esc(inst.version)}. ${S.library.settings.autoUpdate ? 'It will update automatically.' : 'Update to get the latest build.'}</div></div><button class="btn update sm" data-action="install" ${a}>${icon('update')} Update now</button></div>`);
   const lastErr = S.history.find((h) => h.gameId === id);
   if (lastErr?.phase === 'error' && st !== 'installing' && Date.now() - lastErr.at < 10 * 60 * 1000) {
@@ -535,7 +564,7 @@ export function gamePage(id) {
         ${iconArt(g, 'gi', '32px')}
         <div>
           <h1>${esc(g.name)}</h1>
-          <div class="by">${g.developer ? `<span>${esc(g.developer)}</span><span class="dot-sep"></span>` : ''}<span>${web ? 'Browser game' : `v${esc(g.version)}`}</span>${g.tags?.length ? `<span class="dot-sep"></span><span>${g.tags.slice(0, 3).map(esc).join(', ')}</span>` : ''}</div>
+          <div class="by">${g.developer ? `<span>${esc(g.developer)}</span><span class="dot-sep"></span>` : ''}<span>${web ? 'Browser game' : g.version ? `v${esc(g.version)}` : 'Not installed'}</span>${g.tags?.length ? `<span class="dot-sep"></span><span>${g.tags.slice(0, 3).map(esc).join(', ')}</span>` : ''}</div>
         </div>
       </div>
       <div class="action-bar">
@@ -559,7 +588,7 @@ export function gamePage(id) {
       <div class="side-card">
         ${kv('Developer', esc(g.developer || ''))}
         ${kv('Type', web ? 'Browser game · no download' : '')}
-        ${kv('Latest version', g.version ? `v${esc(g.version)}` : '')}
+        ${kv('Latest version', g.version && !g.uncatalogued ? `v${esc(g.version)}` : '')}
         ${kv('Released', esc(g.released || ''))}
         ${kv('Download size', g.size ? bytes(g.size) : '')}
         ${kv('Installed', web ? '' : inst ? `v${esc(inst.version)}` : e ? 'Not installed' : '')}

@@ -555,6 +555,12 @@ p { margin: 0; }
 .ver-keep .grow { flex: 1; min-width: 0; }
 .ver-keep .t { font-weight: 600; }
 .ver-keep .s { color: var(--text-faint); font-size: 13px; margin-top: 2px; }
+.ver-limit { display: flex; align-items: center; gap: 16px; padding: 0 0 14px; }
+.ver-limit .grow { flex: 1; min-width: 0; }
+.ver-limit .t { font-weight: 600; }
+.ver-limit .s { color: var(--text-faint); font-size: 13px; margin-top: 2px; }
+.select.sm { height: 32px; font-size: 13px; }
+.ver-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 13px; }
 .ver-row { display: grid; grid-template-columns: minmax(120px, auto) 1fr auto; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
 .ver-row .vv { display: flex; align-items: center; gap: 8px; }
 .ver-row .vv b { font-weight: 700; }

@@ -30,22 +30,32 @@ export function entry(id) {
   return S.library.games[id] || null;
 }
 
-/** A game as the UI sees it: catalog data, or a stub for an installed game
- *  that has since vanished from the catalog. */
+/** A game as the UI sees it: catalog data, or — for a library game that's
+ *  not in the catalog — the snapshot the library kept of its last entry.
+ *  `uncatalogued`: not in the catalog we have. `orphan`: removed from a
+ *  catalog that did load (without any catalog we can't tell). */
 export function game(id) {
   const g = catalogGame(id);
   if (g) return g;
   const e = entry(id);
   if (!e) return null;
+  const snap = e.snapshot || {};
   return {
-    id,
-    name: e.name || id,
-    version: e.installed?.version || '',
     description: '',
     screenshots: [],
     tags: [],
+    ...snap,
+    id,
+    name: snap.name || e.name || id,
+    // Only what's on this computer is meaningful now.
+    version: e.installed?.version || '',
+    releaseNotes: null,
+    released: null,
+    size: null,
+    featured: false,
     available: false,
-    orphan: true,
+    uncatalogued: true,
+    orphan: !!S.catalog,
   };
 }
 

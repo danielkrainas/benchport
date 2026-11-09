@@ -97,6 +97,56 @@ fn catalog_view(st: &AppState) -> Option<CatalogView> {
     })
 }
 
+/// Remember how each library game looked in the catalog, so it can still be
+/// shown properly if it's later removed. Only writes when something changed.
+/// Local catalog images arrive inlined as data: URLs. Keep small icons and
+/// banners, but don't let screenshots bloat library.json.
+fn slim_snapshot(mut v: serde_json::Value) -> serde_json::Value {
+    const MAX_INLINE: usize = 256 * 1024;
+    let is_data = |x: &serde_json::Value| x.as_str().is_some_and(|s| s.starts_with("data:"));
+    if let Some(o) = v.as_object_mut() {
+        for key in ["icon", "banner"] {
+            if o.get(key).is_some_and(|x| is_data(x) && x.as_str().unwrap().len() > MAX_INLINE) {
+                o.remove(key);
+            }
+        }
+        if let Some(serde_json::Value::Array(shots)) = o.get_mut("screenshots") {
+            shots.retain(|x| !is_data(x));
+        }
+    }
+    v
+}
+
+pub(crate) fn snapshot_library(app: &AppHandle) {
+    let st = state(app);
+    let views: Vec<(String, String, serde_json::Value)> = {
+        let guard = st.catalog.read().unwrap();
+        let Some(c) = guard.as_ref() else { return };
+        let lib = st.library.lock().unwrap();
+        c.catalog
+            .games
+            .iter()
+            .filter(|g| lib.games.contains_key(&g.id))
+            .filter_map(|g| {
+                let v = slim_snapshot(serde_json::to_value(GameView::from_game(g, Some(&c.location))).ok()?);
+                let e = &lib.games[&g.id];
+                (e.snapshot.as_ref() != Some(&v) || e.name.as_deref() != Some(&g.name)).then(|| (g.id.clone(), g.name.clone(), v))
+            })
+            .collect()
+    };
+    if views.is_empty() {
+        return;
+    }
+    let _ = st.update_library(app, |lib| {
+        for (id, name, v) in views {
+            if let Some(e) = lib.games.get_mut(&id) {
+                e.name = Some(name);
+                e.snapshot = Some(v);
+            }
+        }
+    });
+}
+
 async fn load_catalog(app: &AppHandle) -> Result<()> {
     let st = state(app);
     let _guard = st.refresh_lock.lock().await;
@@ -149,6 +199,7 @@ async fn load_catalog(app: &AppHandle) -> Result<()> {
     };
     *st.catalog.write().unwrap() = Some(new_state);
     drop(_guard);
+    snapshot_library(app);
     installer::run_auto_updates(app);
     let _ = app.emit("catalog://changed", ());
     Ok(())
@@ -222,13 +273,14 @@ fn get_library(app: AppHandle) -> LibraryView {
 #[tauri::command]
 fn add_to_library(app: AppHandle, id: String) -> Result<()> {
     let st = state(&app);
-    let name = st.find_game(&id).map(|(g, _)| g.name);
+    if st.find_game(&id).is_none() {
+        return Err(Error::msg("This game is no longer in the catalog."));
+    }
     st.update_library(&app, |lib| {
-        let e = lib.entry(&id);
-        if name.is_some() {
-            e.name = name;
-        }
-    })
+        lib.entry(&id);
+    })?;
+    snapshot_library(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -265,6 +317,16 @@ async fn launch_game(app: AppHandle, id: String, version: Option<String>) -> Res
 #[tauri::command]
 fn set_keep_versions(app: AppHandle, id: String, keep: bool) -> Result<()> {
     state(&app).update_library(&app, |lib| lib.entry(&id).keep_versions = keep)
+}
+
+#[tauri::command]
+fn set_keep_limit(app: AppHandle, id: String, limit: Option<u32>) -> Result<()> {
+    installer::set_keep_limit(&app, &id, limit)
+}
+
+#[tauri::command]
+fn delete_all_versions(app: AppHandle, id: String) -> Result<()> {
+    installer::delete_all_versions(&app, &id)
 }
 
 #[tauri::command]
@@ -476,6 +538,8 @@ pub fn run() {
             stop_game,
             set_keep_versions,
             delete_version,
+            set_keep_limit,
+            delete_all_versions,
             set_settings,
             open_game_folder,
             open_path,

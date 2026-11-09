@@ -266,6 +266,7 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
             .map_err(|e| Error::msg(e.to_string()))??;
 
         // 5. Record.
+        let mut pruned = Vec::new();
         st.update_library(app, |lib| {
             let e = lib.entry(&game.id);
             e.name = Some(game.name.clone());
@@ -292,7 +293,10 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
                 installed_at: now(),
                 size_bytes: size,
             });
+            pruned = e.prune_kept(None);
         })?;
+        remove_builds(&games_dir, &pruned);
+        crate::snapshot_library(app);
         Ok(())
     }
     .await;
@@ -537,6 +541,50 @@ pub fn uninstall(app: &AppHandle, id: &str) -> Result<()> {
             e.kept.clear();
         }
     })
+}
+
+/// Delete kept builds' files (only ever inside our games directory).
+fn remove_builds(games_dir: &Path, builds: &[Installed]) {
+    for b in builds {
+        if b.path.starts_with(games_dir) && b.path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&b.path) {
+                eprintln!("couldn't remove {}: {e}", b.path.display());
+            }
+        }
+    }
+}
+
+/// Change how many older builds a game keeps, pruning any extras now.
+/// A build that's currently playing is never removed.
+pub fn set_keep_limit(app: &AppHandle, id: &str, limit: Option<u32>) -> Result<()> {
+    let st = state(app);
+    let playing = st.running.lock().unwrap().get(id).and_then(|r| r.version().map(str::to_string));
+    let mut pruned = Vec::new();
+    st.update_library(app, |lib| {
+        let e = lib.entry(id);
+        e.keep_limit = limit;
+        pruned = e.prune_kept(playing.as_deref());
+    })?;
+    remove_builds(&st.paths.games, &pruned);
+    Ok(())
+}
+
+/// Delete every kept older build of a game (the current install stays).
+pub fn delete_all_versions(app: &AppHandle, id: &str) -> Result<()> {
+    let st = state(app);
+    if st.running.lock().unwrap().contains_key(id) {
+        return Err(Error::msg("Close the game before deleting versions."));
+    }
+    let mut removed = Vec::new();
+    st.update_library(app, |lib| {
+        if let Some(e) = lib.games.get_mut(id) {
+            removed = std::mem::take(&mut e.kept);
+        }
+    })?;
+    remove_builds(&st.paths.games, &removed);
+    let versions = versions_dir(&st.paths.games, id);
+    let _ = std::fs::remove_dir(&versions); // only if empty
+    Ok(())
 }
 
 /// Delete one kept older version.
