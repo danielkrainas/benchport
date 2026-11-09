@@ -22,7 +22,9 @@ struct GameState {
     exit_code: Option<i32>,
 }
 
-pub fn launch(app: &AppHandle, id: &str) -> Result<()> {
+/// Launch a game. `version` picks a kept older build; `None` runs the
+/// current install.
+pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
     let st = state(app);
     if let Some((game, base)) = st.find_game(id).filter(|(g, _)| g.is_web()) {
         return launch_web(app, &game, &base);
@@ -33,14 +35,16 @@ pub fn launch(app: &AppHandle, id: &str) -> Result<()> {
     if st.jobs.lock().unwrap().contains_key(id) {
         return Err(Error::msg("Wait for the download to finish first."));
     }
-    let installed = st
-        .library
-        .lock()
-        .unwrap()
-        .games
-        .get(id)
-        .and_then(|e| e.installed.clone())
-        .ok_or_else(|| Error::msg("This game is not installed."))?;
+    let installed = {
+        let lib = st.library.lock().unwrap();
+        let e = lib.games.get(id);
+        match version {
+            Some(v) if !e.and_then(|e| e.installed.as_ref()).is_some_and(|i| i.version == v) => e
+                .and_then(|e| e.kept.iter().find(|k| k.version == v).cloned())
+                .ok_or_else(|| Error::msg(format!("Version {v} is not installed.")))?,
+            _ => e.and_then(|e| e.installed.clone()).ok_or_else(|| Error::msg("This game is not installed."))?,
+        }
+    };
 
     let exe = installed.path.join(&installed.executable);
     if !exe.exists() {

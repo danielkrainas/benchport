@@ -217,6 +217,11 @@ show the update with a link to `page`. Debug builds never replace themselves; se
   cancelled update leaves the previous install untouched.
 - **Library:** what's added, installed versions, play time and last played are
   stored in `library.json` in the app data folder (Settings → Storage).
+- **Keeping old versions:** each game page has an **Installed versions** panel with a
+  per-game *Keep previous versions* switch. When it's on, an update moves the old build to
+  `games/.versions/<id>/<version>/` instead of deleting it. The Play button then gets a ▾
+  menu to choose *Latest* or any kept build, and each kept build can be played, opened or
+  deleted from the panel. Uninstalling a game removes its kept builds too.
 
 ## Project layout
 

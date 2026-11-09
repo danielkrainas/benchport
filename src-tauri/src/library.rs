@@ -32,6 +32,12 @@ pub struct LibraryEntry {
     /// game later disappears from the catalog or we are offline.
     #[serde(default)]
     pub name: Option<String>,
+    /// Keep the previous build around when this game updates.
+    #[serde(default)]
+    pub keep_versions: bool,
+    /// Older builds kept by `keep_versions`, newest first.
+    #[serde(default)]
+    pub kept: Vec<Installed>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

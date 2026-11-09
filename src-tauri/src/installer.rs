@@ -248,11 +248,20 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
         }
         handle.await.map_err(|e| Error::msg(e.to_string()))??;
 
-        // 4. Swap into place.
+        // 4. Swap into place, keeping the old build if the player asked to.
         rep.phase(Phase::Finalizing, None);
+        let previous = {
+            let lib = st.library.lock().unwrap();
+            lib.games
+                .get(&game.id)
+                .filter(|e| e.keep_versions)
+                .and_then(|e| e.installed.clone())
+                .filter(|p| p.version != game.version && p.path == games_dir.join(&game.id))
+        };
+        let keep_as = previous.as_ref().map(|p| versions_dir(&games_dir, &game.id).join(sanitize(&p.version)));
         let exe = build.executable.clone();
-        let (stg, gd, id) = (staging.clone(), games_dir.clone(), game.id.clone());
-        let (final_dir, size) = tokio::task::spawn_blocking(move || finalize(&stg, &gd, &id, &exe))
+        let (stg, gd, id, ka) = (staging.clone(), games_dir.clone(), game.id.clone(), keep_as.clone());
+        let (final_dir, size, kept) = tokio::task::spawn_blocking(move || finalize(&stg, &gd, &id, &exe, ka.as_deref()))
             .await
             .map_err(|e| Error::msg(e.to_string()))??;
 
@@ -260,6 +269,21 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
         st.update_library(app, |lib| {
             let e = lib.entry(&game.id);
             e.name = Some(game.name.clone());
+            if let (true, Some(prev), Some(dest)) = (kept, previous.clone(), keep_as.clone()) {
+                e.kept.retain(|k| k.version != prev.version);
+                e.kept.insert(0, Installed { path: dest, ..prev });
+            }
+            // Reinstalling a version we were keeping makes the copy redundant.
+            let games = games_dir.clone();
+            e.kept.retain(|k| {
+                if k.version != game.version {
+                    return true;
+                }
+                if k.path.starts_with(&games) {
+                    let _ = std::fs::remove_dir_all(&k.path);
+                }
+                false
+            });
             e.installed = Some(Installed {
                 version: game.version.clone(),
                 path: final_dir,
@@ -407,10 +431,18 @@ pub fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progres
     Ok(())
 }
 
+/// Where builds kept by "keep previous versions" live. Game ids can't start
+/// with a dot, so this never collides with a game folder.
+pub fn versions_dir(games_dir: &Path, id: &str) -> PathBuf {
+    games_dir.join(".versions").join(id)
+}
+
 /// Locate the game root inside the staging dir, move it into
 /// `games/<id>` (replacing any previous version), and make the executable
-/// runnable. Returns the final path and its size on disk.
-fn finalize(staging: &Path, games_dir: &Path, id: &str, executable: &str) -> Result<(PathBuf, u64)> {
+/// runnable. With `keep_old_as`, the previous build is moved there instead of
+/// being deleted. Returns the final path, its size, and whether the old build
+/// was kept.
+fn finalize(staging: &Path, games_dir: &Path, id: &str, executable: &str, keep_old_as: Option<&Path>) -> Result<(PathBuf, u64, bool)> {
     // Many zips wrap everything in one top-level folder; look through it.
     let mut root = staging.to_path_buf();
     if !root.join(executable).exists() {
@@ -459,14 +491,24 @@ fn finalize(staging: &Path, games_dir: &Path, id: &str, executable: &str) -> Res
         }
         return Err(e.into());
     }
+    let mut kept = false;
     if had_previous {
-        let _ = std::fs::remove_dir_all(&old);
+        if let Some(dest) = keep_old_as {
+            let _ = std::fs::remove_dir_all(dest);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            kept = std::fs::rename(&old, dest).is_ok();
+        }
+        if !kept {
+            let _ = std::fs::remove_dir_all(&old);
+        }
     }
     if staging.exists() {
         let _ = std::fs::remove_dir_all(staging);
     }
     let size = dir_size(&final_dir);
-    Ok((final_dir, size))
+    Ok((final_dir, size, kept))
 }
 
 pub fn uninstall(app: &AppHandle, id: &str) -> Result<()> {
@@ -484,9 +526,39 @@ pub fn uninstall(app: &AppHandle, id: &str) -> Result<()> {
             std::fs::remove_dir_all(&path)?;
         }
     }
+    // Kept older versions go too.
+    let versions = versions_dir(&st.paths.games, id);
+    if versions.exists() {
+        std::fs::remove_dir_all(&versions)?;
+    }
     st.update_library(app, |lib| {
         if let Some(e) = lib.games.get_mut(id) {
             e.installed = None;
+            e.kept.clear();
+        }
+    })
+}
+
+/// Delete one kept older version.
+pub fn delete_version(app: &AppHandle, id: &str, version: &str) -> Result<()> {
+    let st = state(app);
+    if st.running.lock().unwrap().contains_key(id) {
+        return Err(Error::msg("Close the game before deleting a version."));
+    }
+    let path = st
+        .library
+        .lock()
+        .unwrap()
+        .games
+        .get(id)
+        .and_then(|e| e.kept.iter().find(|k| k.version == version).map(|k| k.path.clone()))
+        .ok_or_else(|| Error::msg(format!("Version {version} isn't kept for this game.")))?;
+    if path.starts_with(&st.paths.games) && path.exists() {
+        std::fs::remove_dir_all(&path)?;
+    }
+    st.update_library(app, |lib| {
+        if let Some(e) = lib.games.get_mut(id) {
+            e.kept.retain(|k| k.version != version);
         }
     })
 }
@@ -539,7 +611,7 @@ mod tests {
         make_zip(&zip_path, &[("Game/run.sh", "#!/bin/sh\n"), ("Game/data/level.txt", "1")]);
         let staging = games.join(".staging-g");
         extract(&zip_path, &staging, &AtomicBool::new(false), |_, _| {}).unwrap();
-        let (dir, size) = finalize(&staging, &games, "g", "run.sh").unwrap();
+        let (dir, size, _) = finalize(&staging, &games, "g", "run.sh", None).unwrap();
 
         assert_eq!(dir, games.join("g"));
         assert!(dir.join("run.sh").is_file());
@@ -552,6 +624,25 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert!(std::fs::metadata(dir.join("run.sh")).unwrap().permissions().mode() & 0o111 != 0);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_can_keep_previous_build() {
+        let root = tmpdir("keep");
+        let games = root.join("games");
+        std::fs::create_dir_all(games.join("g")).unwrap();
+        std::fs::write(games.join("g/run.sh"), "v1").unwrap();
+        let zip_path = root.join("g.zip");
+        make_zip(&zip_path, &[("run.sh", "v2")]);
+        let staging = games.join(".staging-g");
+        extract(&zip_path, &staging, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let keep = versions_dir(&games, "g").join("1.0");
+        let (dir, _, kept) = finalize(&staging, &games, "g", "run.sh", Some(&keep)).unwrap();
+        assert!(kept);
+        assert_eq!(std::fs::read_to_string(dir.join("run.sh")).unwrap(), "v2");
+        assert_eq!(std::fs::read_to_string(keep.join("run.sh")).unwrap(), "v1");
+        assert!(!games.join(".old-g").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -577,7 +668,7 @@ mod tests {
         make_zip(&zip_path, &[("readme.txt", "")]);
         let staging = games.join(".staging-g");
         extract(&zip_path, &staging, &AtomicBool::new(false), |_, _| {}).unwrap();
-        assert!(finalize(&staging, &games, "g", "Game.exe").is_err());
+        assert!(finalize(&staging, &games, "g", "Game.exe", None).is_err());
         assert!(games.join("g/Game.exe").exists(), "previous install must survive a bad update");
         let _ = std::fs::remove_dir_all(&root);
     }

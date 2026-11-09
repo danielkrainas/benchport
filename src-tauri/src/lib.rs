@@ -244,9 +244,19 @@ fn uninstall_game(app: AppHandle, id: String) -> Result<()> {
 
 // async: creating a window from a sync (main-thread) command deadlocks on Windows.
 #[tauri::command]
-async fn launch_game(app: AppHandle, id: String) -> Result<()> {
+async fn launch_game(app: AppHandle, id: String, version: Option<String>) -> Result<()> {
     selfupdate::require_current(&app)?;
-    runner::launch(&app, &id)
+    runner::launch(&app, &id, version.as_deref())
+}
+
+#[tauri::command]
+fn set_keep_versions(app: AppHandle, id: String, keep: bool) -> Result<()> {
+    state(&app).update_library(&app, |lib| lib.entry(&id).keep_versions = keep)
+}
+
+#[tauri::command]
+fn delete_version(app: AppHandle, id: String, version: String) -> Result<()> {
+    installer::delete_version(&app, &id, &version)
 }
 
 #[tauri::command]
@@ -303,14 +313,17 @@ fn restart_to_update(app: AppHandle) -> Result<()> {
 }
 
 #[tauri::command]
-fn open_game_folder(app: AppHandle, id: String) -> Result<()> {
+fn open_game_folder(app: AppHandle, id: String, version: Option<String>) -> Result<()> {
     let path = state(&app)
         .library
         .lock()
         .unwrap()
         .games
         .get(&id)
-        .and_then(|e| e.installed.as_ref().map(|i| i.path.clone()))
+        .and_then(|e| match &version {
+            Some(v) => e.kept.iter().chain(e.installed.iter()).find(|k| &k.version == v).map(|k| k.path.clone()),
+            None => e.installed.as_ref().map(|i| i.path.clone()),
+        })
         .ok_or_else(|| Error::msg("This game is not installed."))?;
     app.opener().open_path(path.display().to_string(), None::<&str>).map_err(|e| Error::msg(e.to_string()))
 }
@@ -448,6 +461,8 @@ pub fn run() {
             uninstall_game,
             launch_game,
             stop_game,
+            set_keep_versions,
+            delete_version,
             set_settings,
             open_game_folder,
             open_path,

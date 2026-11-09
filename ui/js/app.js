@@ -263,12 +263,13 @@ const actions = {
   async cancel({ id }) {
     await call('cancel_install', { id });
   },
-  async play({ id }) {
+  async play({ id, version }) {
     S.menuOpen = null;
-    await call('launch_game', { id });
+    scheduleRender();
+    await call('launch_game', { id, version: version || null });
     const g = game(id);
     if (g?.kind === 'web' && !g.opensInBrowser) return; // its window opens right away
-    toast({ title: `Launching ${g?.name}`, sub: g?.opensInBrowser ? 'Opening in your browser' : 'Have fun!', kind: 'ok', g, ms: 3000 });
+    toast({ title: `Launching ${g?.name}${version ? ` v${version}` : ''}`, sub: g?.opensInBrowser ? 'Opening in your browser' : 'Have fun!', kind: 'ok', g, ms: 3000 });
   },
   async stop({ id }) {
     await call('stop_game', { id });
@@ -281,7 +282,7 @@ const actions = {
     S.menuOpen = null;
     scheduleRender();
     const g = game(id);
-    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: 'The game files will be deleted from this computer. It stays in your library so you can reinstall it any time.', ok: 'Uninstall', danger: true }))) return;
+    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: `The game files${S.library.games[id]?.kept?.length ? ', including kept older versions,' : ''} will be deleted from this computer. It stays in your library so you can reinstall it any time.`, ok: 'Uninstall', danger: true }))) return;
     await call('uninstall_game', { id });
     toast({ title: 'Uninstalled', sub: g.name, g });
   },
@@ -298,10 +299,24 @@ const actions = {
     await call('remove_from_library', { id });
     if (!catalogGame(id)) location.hash = '#/library';
   },
-  async 'open-folder'({ id }) {
+  async 'open-folder'({ id, version }) {
     S.menuOpen = null;
     scheduleRender();
-    await call('open_game_folder', { id });
+    await call('open_game_folder', { id, version: version || null });
+  },
+  async 'toggle-keep'({ id }) {
+    const e = S.library.games[id];
+    if (!e) return;
+    e.keepVersions = !e.keepVersions;
+    render();
+    await call('set_keep_versions', { id, keep: e.keepVersions });
+    if (e.keepVersions) toast({ title: 'Keeping previous versions', sub: `Older builds of ${game(id)?.name} will stay installed after updates.`, kind: 'ok', ms: 3500 });
+  },
+  async 'delete-version'({ id, version }) {
+    const g = game(id);
+    if (!(await confirmModal({ title: `Delete ${g?.name} v${version}?`, text: 'This older build will be removed from this computer. The current version is not affected.', ok: 'Delete', danger: true }))) return;
+    await call('delete_version', { id, version });
+    toast({ title: `Deleted v${version}`, sub: g?.name, g });
   },
   async 'open-path'({ which }) {
     await call('open_path', { which });

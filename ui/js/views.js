@@ -1,7 +1,7 @@
 // Pure render functions: state in, HTML string out.
 
 import { icon } from './icons.js';
-import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel, isWeb, playable } from './store.js';
+import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel, isWeb, playable, kept, diskUsage } from './store.js';
 import { esc, cssUrl, hashHue, initials, bytes, playtime, ago, niceDate, eta, platformName } from './util.js';
 
 // ---------------------------------------------------------------- pieces
@@ -70,6 +70,48 @@ const indeterminate = (job) => job && (job.phase === 'queued' || job.phase === '
 
 export function bar(id, job, cls = 'bar') {
   return `<div class="${cls}${indeterminate(job) ? ' indeterminate' : ''}" data-prog-bar="${esc(id)}"><i data-prog-fill="${esc(id)}" style="width:${overallPercent(job)}%"></i></div>`;
+}
+
+/** Play button with a version picker when older builds are kept. */
+function playChooser(id) {
+  const st = status(id);
+  const older = kept(id);
+  if (!older.length || (st !== 'installed' && st !== 'update' && st !== 'owned')) return actionButton(id, 'lg');
+  const inst = entry(id)?.installed;
+  const a = `data-id="${esc(id)}"`;
+  const items = [
+    inst ? `<button data-action="play" ${a}>${icon('play')}<span class="grow">Latest</span><span class="ver">v${esc(inst.version)}</span></button>` : '',
+    ...older.map((k) => `<button data-action="play" ${a} data-version="${esc(k.version)}">${icon('clock')}<span class="grow">Previous build</span><span class="ver">v${esc(k.version)}</span></button>`),
+  ].join('');
+  const main = inst ? actionButton(id, 'lg') : `<button class="btn play lg" data-action="play" ${a} data-version="${esc(older[0].version)}">${icon('play')} Play v${esc(older[0].version)}</button>`;
+  return `<div class="split menu-wrap">${main}<button class="btn lg icon caret ${st === 'update' ? 'update' : 'play'}" data-action="menu" data-menu="play" title="Choose version">${icon('chevronDown')}</button>
+    ${S.menuOpen === 'play' ? `<div class="menu left"><div class="menu-h">Play version</div>${items}</div>` : ''}</div>`;
+}
+
+/** Installed + kept builds, with the keep-versions toggle. */
+function versionsBlock(id) {
+  const e = entry(id);
+  const g = game(id);
+  if (!e || g?.kind === 'web') return '';
+  const inst = e.installed;
+  const older = kept(id);
+  const a = `data-id="${esc(id)}"`;
+  const running = S.running.has(id);
+  const row = (k, current) => `<div class="ver-row">
+      <div class="vv"><b>v${esc(k.version)}</b>${current ? '<span class="chip accent">Current</span>' : ''}</div>
+      <div class="vm">Installed ${esc(ago(k.installedAt).toLowerCase())} · ${bytes(k.sizeBytes)}</div>
+      <div class="va">
+        <button class="btn sm ghost" data-action="play" ${a}${current ? '' : ` data-version="${esc(k.version)}"`}${running ? ' disabled' : ''}>${icon('play')} Play</button>
+        <button class="btn sm icon ghost" data-action="open-folder" ${a} data-version="${esc(k.version)}" title="Open folder">${icon('folder')}</button>
+        ${current ? '' : `<button class="btn sm icon ghost danger-h" data-action="delete-version" ${a} data-version="${esc(k.version)}" title="Delete this version"${running ? ' disabled' : ''}>${icon('trash')}</button>`}
+      </div>
+    </div>`;
+  if (!inst && !older.length && !e.keepVersions) return '';
+  return `<div class="block"><h2>Installed versions</h2><div class="versions">
+    <div class="ver-keep"><div class="grow"><div class="t">Keep previous versions</div><div class="s">When ${esc(g?.name || 'this game')} updates, keep the old build so you can still play it.</div></div>
+      <button class="toggle${e.keepVersions ? ' on' : ''}" data-action="toggle-keep" ${a} role="switch" aria-checked="${!!e.keepVersions}"></button></div>
+    ${inst ? row(inst, true) : ''}${older.map((k) => row(k, false)).join('')}
+  </div></div>`;
 }
 
 /** The big contextual button: Install / Update / Play / progress / Stop. */
@@ -406,7 +448,7 @@ export function libraryPage() {
   const list = ids.filter(filters[S.libFilter] || filters.all).sort(sorters[S.libSort] || sorters.name);
   const chip = (k, label) => `<button class="${S.libFilter === k ? 'on' : ''}" data-action="lib-filter" data-f="${k}">${label} <span class="n">${counts[k]}</span></button>`;
   const opt = (k, label) => `<option value="${k}"${S.libSort === k ? ' selected' : ''}>${label}</option>`;
-  const totalSize = ids.reduce((n, id) => n + (entry(id)?.installed?.sizeBytes || 0), 0);
+  const totalSize = ids.reduce((n, id) => n + diskUsage(id), 0);
 
   return `${offlineBanner()}<div class="page">
     <div class="page-head">
@@ -442,7 +484,7 @@ export function gamePage(id) {
   } else if (inst) {
     stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
     stats.push(['Version', st === 'update' ? `<span class="upd">v${esc(inst.version)} → v${esc(g.version)}</span>` : `v${esc(inst.version)}`]);
-    stats.push(['Size', bytes(inst.sizeBytes)]);
+    stats.push(['Size', bytes(diskUsage(id))]);
   } else {
     if (g.version) stats.push(['Version', `v${esc(g.version)}`]);
     if (g.size) stats.push(['Download', bytes(g.size)]);
@@ -491,7 +533,7 @@ export function gamePage(id) {
         </div>
       </div>
       <div class="action-bar">
-        <div class="acts">${actionButton(id, 'lg')}${!e && st === 'none' && !web ? `<button class="btn lg ghost" data-action="add" ${a}>${icon('plus')} Add to library</button>` : ''}</div>
+        <div class="acts">${playChooser(id)}${!e && st === 'none' && !web ? `<button class="btn lg ghost" data-action="add" ${a}>${icon('plus')} Add to library</button>` : ''}</div>
         ${st === 'installing'
           ? `<div class="stats"><div class="stat" style="flex:1;max-width:420px"><div class="k">${job?.isUpdate ? `Updating to v${esc(job.version)}` : 'Installing'}</div>${bar(id, job)}<div class="dl-detail" data-prog-detail="${esc(id)}">${esc(progressDetail(job))}</div></div></div>`
           : `<div class="stats">${stats.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`}
@@ -503,6 +545,7 @@ export function gamePage(id) {
     <div>
       ${notices.join('')}
       ${g.releaseNotes ? `<div class="block"><h2>What's new</h2><div class="release-notes">${g.version || g.released ? `<span class="chip accent vtag">${[g.version && `v${esc(g.version)}`, g.released && esc(g.released)].filter(Boolean).join(' · ')}</span>` : ''}<div class="prose selectable">${esc(g.releaseNotes)}</div></div></div>` : ''}
+      ${versionsBlock(id)}
       ${g.description ? `<div class="block"><h2>About this game</h2><div class="prose selectable">${esc(g.description)}</div></div>` : ''}
       ${shots}
     </div>
@@ -515,6 +558,7 @@ export function gamePage(id) {
         ${kv('Download size', g.size ? bytes(g.size) : '')}
         ${kv('Installed', web ? '' : inst ? `v${esc(inst.version)}` : e ? 'Not installed' : '')}
         ${kv('Installed on', inst ? esc(ago(inst.installedAt)) : '')}
+        ${kv('Kept versions', kept(id).length ? kept(id).map((k) => `v${esc(k.version)}`).join(', ') : '')}
         ${kv('Platform', web ? 'Any' : esc(platformName(S.config?.platform)))}
         ${g.tags?.length ? `<div class="tags">${g.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
       </div>
@@ -596,7 +640,7 @@ export function settingsPage() {
   const cat = S.catalog;
   const auto = S.library.settings.autoUpdate;
   const autoLauncher = S.library.settings.autoUpdateLauncher !== false;
-  const totalSize = libraryIds().reduce((n, id) => n + (entry(id)?.installed?.sizeBytes || 0), 0);
+  const totalSize = libraryIds().reduce((n, id) => n + diskUsage(id), 0);
   const row = (t, d, right = '') => `<div class="set-row"><div class="l"><div class="t">${t}</div>${d ? `<div class="d">${d}</div>` : ''}</div>${right}</div>`;
   const catStatus = !cat ? (S.catalogLoading ? 'Loading…' : `<span style="color:var(--danger)">Unavailable</span> — ${esc(S.catalogError || '')}`)
     : cat.offline ? `<span style="color:var(--warn)">Offline</span> — using copy from ${esc(ago(cat.fetchedAt))}`

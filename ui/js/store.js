@@ -49,6 +49,12 @@ export function game(id) {
   };
 }
 
+/** Older builds kept by "keep previous versions", newest first. */
+export const kept = (id) => entry(id)?.kept || [];
+
+/** Disk used by a game: current install plus kept versions. */
+export const diskUsage = (id) => (entry(id)?.installed?.sizeBytes || 0) + kept(id).reduce((n, k) => n + (k.sizeBytes || 0), 0);
+
 export const isWeb = (id) => catalogGame(id)?.kind === 'web';
 
 /** In the library and ready to play right now (installed, or a browser game). */
