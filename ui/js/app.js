@@ -11,6 +11,7 @@ const appWindow = T.window.getCurrentWindow();
 const $ = (sel) => document.querySelector(sel);
 const main = $('#main');
 const sidebarEl = $('#sidebar');
+const gateEl = $('#gate');
 
 // ---------------------------------------------------------------- helpers
 
@@ -127,6 +128,9 @@ function render({ enter = false } = {}) {
     main.scrollTop = scroll;
   }
   sidebarEl.innerHTML = V.sidebar();
+  const gate = V.updateGate();
+  gateEl.innerHTML = gate;
+  gateEl.hidden = !gate;
   restartSpotTimer();
 }
 function scheduleRender() {
@@ -331,6 +335,26 @@ const actions = {
     render();
     await call('set_settings', { settings });
   },
+  async 'toggle-auto-launcher'() {
+    const settings = { ...S.library.settings, autoUpdateLauncher: S.library.settings.autoUpdateLauncher === false };
+    S.library.settings = settings;
+    render();
+    await call('set_settings', { settings });
+  },
+  async 'check-update'() {
+    const u = await call('check_launcher_update');
+    if (u.phase === 'upToDate') toast({ title: `${S.config.name} is up to date`, sub: `Version ${u.current}`, kind: 'ok', ms: 2500 });
+  },
+  async 'download-update'() {
+    await call('download_launcher_update');
+  },
+  async 'restart-update'() {
+    if (S.running.size) {
+      toast({ title: 'Close your games first', sub: 'Quit any running games, then restart the launcher to finish updating.', kind: 'err' });
+      return;
+    }
+    await call('restart_to_update');
+  },
   async 'reload-config'() {
     await call('reload_config');
   },
@@ -472,6 +496,22 @@ listen('game://state', ({ payload }) => {
 
 listen('catalog://changed', () => loadCatalog(false));
 
+listen('launcher://update', ({ payload: u }) => {
+  const prev = S.launcherUpdate;
+  S.launcherUpdate = u;
+  if (prev?.phase === u.phase && u.phase === 'downloading') {
+    // Progress tick: patch in place.
+    const pct = u.total ? Math.min(100, (u.downloaded / u.total) * 100) : 0;
+    document.querySelectorAll('[data-lu-fill]').forEach((el) => (el.style.width = `${pct}%`));
+    document.querySelectorAll('[data-lu-text]').forEach((el) => (el.textContent = V.launcherProgressText(u)));
+    return;
+  }
+  if (u.phase === 'ready' && prev?.phase !== 'ready' && !u.enforced) {
+    toast({ title: `${S.config.name} ${u.latest} is ready`, sub: 'Restart the launcher to update, or it will update next time you close it.', kind: 'ok', ms: 8000 });
+  }
+  scheduleRender();
+});
+
 listen('config://changed', async () => {
   await loadConfig();
   S.catalog = null;
@@ -497,6 +537,7 @@ async function boot() {
   await loadConfig();
   for (const w of S.config.warnings || []) toast({ title: 'Config problem', sub: w, kind: 'err', ms: 10000 });
   await loadLibrary(true);
+  S.launcherUpdate = await invoke('get_launcher_update');
   window.addEventListener('hashchange', onRoute);
   onRoute();
   await loadCatalog(true);

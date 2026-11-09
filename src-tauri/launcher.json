@@ -4,5 +4,6 @@
   "logo": "",
   "catalogUrl": "https://example.com/catalog.json",
   "rssUrl": "",
+  "updateUrl": "",
   "theme": { "primary": "#14161b", "accent": "#4a90d9" }
 }

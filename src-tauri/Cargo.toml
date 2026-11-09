@@ -29,6 +29,10 @@ feed-rs = "2"
 url = "2"
 base64 = "0.22"
 
+[target.'cfg(windows)'.dependencies]
+# Replacing a running .exe needs special handling on Windows.
+self-replace = "1"
+
 [profile.release]
 codegen-units = 1
 lto = true

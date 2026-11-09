@@ -156,6 +156,90 @@ function offlineBanner() {
     <button class="btn sm ghost" data-action="refresh">${icon('refresh')} Retry</button></div>`;
 }
 
+// ---------------------------------------------------------------- launcher self-update
+
+const luPct = (u) => (u?.total ? Math.min(100, (u.downloaded / u.total) * 100) : 0);
+export function launcherProgressText(u) {
+  return u.total ? `${bytes(u.downloaded)} of ${bytes(u.total)} · ${Math.floor(luPct(u))}%` : bytes(u.downloaded);
+}
+function launcherBar(u) {
+  return `<div class="bar${u.total ? '' : ' indeterminate'}"><i data-lu-fill style="width:${luPct(u)}%"></i></div>`;
+}
+
+/** Small card above Settings in the sidebar. */
+function launcherSideBox() {
+  const u = S.launcherUpdate;
+  if (!u || u.enforced) return '';
+  const name = esc(S.config?.name || 'Launcher');
+  if (u.phase === 'downloading') {
+    return `<a class="side-dl" href="#/settings"><div class="row"><b>Updating ${name}</b><span>v${esc(u.latest)}</span></div>${launcherBar(u)}</a>`;
+  }
+  if (u.phase === 'ready') {
+    return `<div class="side-upd"><div class="row">${icon('sparkle')}<div class="grow"><b>${name} v${esc(u.latest)}</b><span>Ready to install</span></div></div>
+      <button class="btn update sm block" data-action="restart-update">${icon('update')} Restart to update</button></div>`;
+  }
+  if (u.phase === 'available') {
+    const btn = u.blocked
+      ? (u.page ? `<button class="btn ghost sm block" data-action="open-url" data-url="${esc(u.page)}">${icon('external')} Get it</button>` : '')
+      : `<button class="btn ghost sm block" data-action="download-update">${icon('download')} Download</button>`;
+    return `<div class="side-upd"><div class="row">${icon('sparkle')}<div class="grow"><b>${name} v${esc(u.latest)}</b><span>Launcher update available</span></div></div>${btn}</div>`;
+  }
+  return '';
+}
+
+/** Blocking screen shown while the launcher is below minimumVersion. */
+export function updateGate() {
+  const u = S.launcherUpdate;
+  if (!u?.enforced) return '';
+  const name = esc(S.config?.name || 'the launcher');
+  let body;
+  if (u.blocked) {
+    body = `<p class="gate-err">${esc(u.blocked)}</p>
+      <div class="acts">${u.page ? `<button class="btn primary" data-action="open-url" data-url="${esc(u.page)}">${icon('external')} Download v${esc(u.latest)}</button>` : ''}</div>`;
+  } else if (u.phase === 'ready') {
+    body = `<div class="acts"><button class="btn update" data-action="restart-update">${icon('update')} Restart and update</button></div>`;
+  } else if (u.phase === 'error') {
+    body = `<p class="gate-err">${esc(u.error)}</p>
+      <div class="acts"><button class="btn primary" data-action="check-update">${icon('refresh')} Try again</button></div>`;
+  } else {
+    body = `<div class="gate-prog"><div class="row"><span>Downloading v${esc(u.latest)}</span><span data-lu-text>${esc(launcherProgressText(u))}</span></div>${launcherBar(u)}</div>`;
+  }
+  return `<div class="modal gate-modal" role="alertdialog">
+    <div class="gate-ic">${icon('update')}</div>
+    <h3>Update required</h3>
+    <p>This version of ${name} (v${esc(u.current)}) is no longer supported. Version ${esc(u.latest)} is needed to keep installing and playing games.</p>
+    ${u.notes ? `<div class="gate-notes selectable">${esc(u.notes)}</div>` : ''}
+    ${body}
+  </div>`;
+}
+
+function launcherUpdateRow(row) {
+  const u = S.launcherUpdate;
+  if (!u || u.phase === 'disabled') {
+    return row('Launcher updates', `Not configured. Add <code>"updateUrl"</code> to <code>launcher.json</code> to enable self-updates.`);
+  }
+  const checked = u.checkedAt ? ` · checked ${esc(ago(u.checkedAt).toLowerCase())}` : '';
+  let line, btn = `<button class="btn sm ghost" data-action="check-update"${u.phase === 'checking' || u.phase === 'downloading' ? ' disabled' : ''}>${icon('refresh')} Check now</button>`;
+  switch (u.phase) {
+    case 'checking': line = 'Checking…'; break;
+    case 'upToDate': line = `<span style="color:var(--play)">Up to date</span> — v${esc(u.current)}${checked}`; break;
+    case 'available':
+      line = `<span style="color:var(--warn)">v${esc(u.latest)} available</span> — you have v${esc(u.current)}${u.blocked ? `<br>${esc(u.blocked)}` : ''}`;
+      if (!u.blocked) btn = `<button class="btn sm update" data-action="download-update">${icon('download')} Download</button>`;
+      else if (u.page) btn = `<button class="btn sm ghost" data-action="open-url" data-url="${esc(u.page)}">${icon('external')} Download page</button>`;
+      break;
+    case 'downloading': line = `Downloading v${esc(u.latest)} — <span data-lu-text>${esc(launcherProgressText(u))}</span>`; break;
+    case 'ready':
+      line = `<span style="color:var(--warn)">v${esc(u.latest)} ready</span> — installs when you restart or close the launcher`;
+      btn = `<button class="btn sm update" data-action="restart-update">${icon('update')} Restart now</button>`;
+      break;
+    case 'error': line = `<span style="color:var(--danger)">Update check failed</span> — ${esc(u.error)}`; break;
+    default: line = `v${esc(u.current)}`;
+  }
+  const notes = u.notes && (u.phase === 'available' || u.phase === 'ready') ? `<div class="lu-notes selectable">${esc(u.notes)}</div>` : '';
+  return row('Launcher updates', `${line}${u.source ? `<br><code class="selectable">${esc(u.source)}</code>` : ''}${notes}`, btn);
+}
+
 // ---------------------------------------------------------------- sidebar
 
 export function sidebar() {
@@ -200,6 +284,7 @@ export function sidebar() {
     <div class="side-list">${list}</div>
     <div class="side-footer">
       ${dlBox}
+      ${launcherSideBox()}
       ${nav('settings', 'settings', 'Settings')}
     </div>`;
 }
@@ -501,6 +586,7 @@ export function settingsPage() {
   const c = S.config;
   const cat = S.catalog;
   const auto = S.library.settings.autoUpdate;
+  const autoLauncher = S.library.settings.autoUpdateLauncher !== false;
   const totalSize = libraryIds().reduce((n, id) => n + (entry(id)?.installed?.sizeBytes || 0), 0);
   const row = (t, d, right = '') => `<div class="set-row"><div class="l"><div class="t">${t}</div>${d ? `<div class="d">${d}</div>` : ''}</div>${right}</div>`;
   const catStatus = !cat ? (S.catalogLoading ? 'Loading…' : `<span style="color:var(--danger)">Unavailable</span> — ${esc(S.catalogError || '')}`)
@@ -515,6 +601,9 @@ export function settingsPage() {
         `<button class="toggle${auto ? ' on' : ''}" data-action="toggle-auto" role="switch" aria-checked="${auto}"></button>`)}
       ${row('Game catalog', `${catStatus}${cat?.version ? ` · catalog version <code>${esc(cat.version)}</code>` : ''}<br><code class="selectable">${esc(c?.catalogUrl)}</code>`,
         `<button class="btn sm ghost" data-action="refresh">${icon('refresh')} Check now</button>`)}
+      ${launcherUpdateRow(row)}
+      ${S.launcherUpdate && S.launcherUpdate.phase !== 'disabled' ? row('Download launcher updates automatically', 'New launcher versions download in the background and install the next time you restart or close the launcher.',
+        `<button class="toggle${autoLauncher ? ' on' : ''}" data-action="toggle-auto-launcher" role="switch" aria-checked="${autoLauncher}"></button>`) : ''}
       ${row('News feed', c?.rssUrl ? `<code class="selectable">${esc(c.rssUrl)}</code>` : 'Not configured')}
     </section>
 

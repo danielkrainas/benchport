@@ -53,6 +53,9 @@ pub struct Settings {
     /// Install updates automatically as soon as the catalog announces them.
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// Download launcher updates in the background (installed on restart).
+    #[serde(default = "yes")]
+    pub auto_update_launcher: bool,
 }
 
 fn yes() -> bool {
@@ -61,7 +64,7 @@ fn yes() -> bool {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto_update: true }
+        Settings { auto_update: true, auto_update_launcher: true }
     }
 }
 

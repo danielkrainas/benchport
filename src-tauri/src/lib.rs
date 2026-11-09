@@ -6,6 +6,7 @@ mod library;
 mod location;
 mod news;
 mod runner;
+mod selfupdate;
 mod state;
 
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_opener::OpenerExt;
 
 use catalog::GameView;
@@ -37,6 +38,7 @@ struct ConfigView {
     logo: Option<String>,
     catalog_url: String,
     rss_url: Option<String>,
+    update_url: Option<String>,
     theme: config::Theme,
     source: String,
     user_config_path: Option<String>,
@@ -157,6 +159,7 @@ fn get_config(app: AppHandle) -> ConfigView {
         logo: resolve_image(&cfg.config.logo, cfg.base.as_ref()),
         catalog_url: cfg.catalog_location().map(|l| l.display()).unwrap_or(cfg.config.catalog_url.clone()),
         rss_url: cfg.rss_location().and_then(|r| r.ok()).map(|l| l.display()),
+        update_url: cfg.update_location().and_then(|r| r.ok()).map(|l| l.display()),
         theme: cfg.config.theme.clone(),
         source: cfg.source.clone(),
         user_config_path: config::user_config_path(&app).map(|p| p.display().to_string()),
@@ -225,6 +228,7 @@ fn remove_from_library(app: AppHandle, id: String) -> Result<()> {
 
 #[tauri::command]
 fn install_game(app: AppHandle, id: String) -> Result<()> {
+    selfupdate::require_current(&app)?;
     installer::start(&app, &id)
 }
 
@@ -240,6 +244,7 @@ fn uninstall_game(app: AppHandle, id: String) -> Result<()> {
 
 #[tauri::command]
 fn launch_game(app: AppHandle, id: String) -> Result<()> {
+    selfupdate::require_current(&app)?;
     runner::launch(&app, &id)
 }
 
@@ -251,11 +256,49 @@ fn stop_game(app: AppHandle, id: String) -> Result<()> {
 #[tauri::command]
 fn set_settings(app: AppHandle, settings: Settings) -> Result<()> {
     let enable_auto = settings.auto_update;
+    let enable_launcher = settings.auto_update_launcher;
     state(&app).update_library(&app, |lib| lib.settings = settings)?;
     if enable_auto {
         installer::run_auto_updates(&app);
     }
+    if enable_launcher && selfupdate::status(&app).phase == selfupdate::Phase::Available {
+        spawn_launcher_check(&app);
+    }
     Ok(())
+}
+
+// ---------------------------------------------------------------- launcher self-update
+
+fn spawn_launcher_check(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let auto = state(&app).library.lock().unwrap().settings.auto_update_launcher;
+        if let Err(e) = selfupdate::check(&app, auto).await {
+            eprintln!("launcher update check failed: {e}");
+        }
+    });
+}
+
+#[tauri::command]
+fn get_launcher_update(app: AppHandle) -> selfupdate::Status {
+    selfupdate::status(&app)
+}
+
+#[tauri::command]
+async fn check_launcher_update(app: AppHandle) -> Result<selfupdate::Status> {
+    let auto = state(&app).library.lock().unwrap().settings.auto_update_launcher;
+    selfupdate::check(&app, auto).await
+}
+
+#[tauri::command]
+async fn download_launcher_update(app: AppHandle) -> Result<selfupdate::Status> {
+    selfupdate::download(&app).await?;
+    Ok(selfupdate::status(&app))
+}
+
+#[tauri::command]
+fn restart_to_update(app: AppHandle) -> Result<()> {
+    selfupdate::apply_and_restart(&app)
 }
 
 #[tauri::command]
@@ -300,6 +343,8 @@ async fn reload_config(app: AppHandle) -> Result<()> {
     let loaded = config::load(&app);
     *state(&app).config.write().unwrap() = loaded;
     *state(&app).catalog.write().unwrap() = None;
+    selfupdate::reset(&app);
+    spawn_launcher_check(&app);
     let _ = app.emit("config://changed", ());
     Ok(())
 }
@@ -339,8 +384,13 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
         .read_timeout(Duration::from_secs(60))
         .build()?;
 
+    let config = config::load(app);
+    let updater = selfupdate::Updater::new(app.package_info().version.to_string(), config.update_location().is_some());
+    // A previously downloaded update is re-fetched if still relevant.
+    let _ = std::fs::remove_dir_all(paths.data.join("launcher-update"));
+
     Ok(AppState {
-        config: RwLock::new(config::load(app)),
+        config: RwLock::new(config),
         client,
         library: Mutex::new(Library::load(&paths.library_file)),
         paths,
@@ -348,6 +398,8 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
         jobs: Mutex::new(HashMap::new()),
         running: Mutex::new(HashMap::new()),
         refresh_lock: tokio::sync::Mutex::new(()),
+        updater: Mutex::new(updater),
+        update_lock: tokio::sync::Mutex::new(()),
     })
 }
 
@@ -363,13 +415,16 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_title(&title);
             }
-            // Periodically re-check the catalog so updates arrive while open.
+            spawn_launcher_check(&handle);
+            // Periodically re-check the catalog (and the launcher itself) so
+            // updates arrive while open.
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(REFRESH_INTERVAL).await;
                     if let Err(e) = load_catalog(&handle).await {
                         eprintln!("background catalog refresh failed: {e}");
                     }
+                    spawn_launcher_check(&handle);
                 }
             });
             Ok(())
@@ -391,7 +446,17 @@ pub fn run() {
             open_path,
             open_url,
             reload_config,
+            get_launcher_update,
+            check_launcher_update,
+            download_launcher_update,
+            restart_to_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Benchport");
+        .build(tauri::generate_context!())
+        .expect("error while building Benchport")
+        .run(|app, event| {
+            // A downloaded launcher update is installed when the app closes.
+            if let RunEvent::Exit = event {
+                selfupdate::apply_on_exit(app);
+            }
+        });
 }

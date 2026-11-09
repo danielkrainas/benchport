@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::installer::Progress;
 use crate::library::Library;
 use crate::location::Location;
+use crate::selfupdate::Updater;
 
 pub struct Paths {
     pub data: PathBuf,
@@ -48,6 +49,9 @@ pub struct AppState {
     pub running: Mutex<HashMap<String, RunningGame>>,
     /// Serialises catalog refreshes so periodic + manual refreshes don't race.
     pub refresh_lock: tokio::sync::Mutex<()>,
+    pub updater: Mutex<Updater>,
+    /// Serialises launcher update checks/downloads.
+    pub update_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {

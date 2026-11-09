@@ -17,6 +17,7 @@ export const S = {
   libFilter: 'all',
   libSort: 'name',
   menuOpen: null,
+  launcherUpdate: null, // selfupdate::Status from the backend
 };
 
 export const ACTIVE_PHASES = new Set(['queued', 'downloading', 'verifying', 'extracting', 'finalizing']);

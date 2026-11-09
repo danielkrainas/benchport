@@ -280,7 +280,35 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
     res
 }
 
-async fn download(client: &reqwest::Client, loc: &Location, dest: &Path, cancel: &AtomicBool, rep: &mut Reporter) -> Result<String> {
+/// Receives download progress; implemented by the game installer and the
+/// launcher self-updater.
+pub trait DownloadSink {
+    fn set_total(&mut self, total: u64);
+    fn add_bytes(&mut self, n: u64);
+    fn finished(&mut self) {}
+}
+
+impl DownloadSink for Reporter {
+    fn set_total(&mut self, total: u64) {
+        self.progress.total = Some(total);
+    }
+    fn add_bytes(&mut self, n: u64) {
+        self.bytes(n);
+    }
+    fn finished(&mut self) {
+        self.progress.percent = Some(100.0);
+        self.emit();
+    }
+}
+
+/// Copy `loc` to `dest`, hashing as we go. Returns the hex sha256.
+pub async fn download(
+    client: &reqwest::Client,
+    loc: &Location,
+    dest: &Path,
+    cancel: &AtomicBool,
+    rep: &mut impl DownloadSink,
+) -> Result<String> {
     let mut file = tokio::fs::File::create(dest).await?;
     let mut hasher = Sha256::new();
     let cancelled = || Error::msg("Cancelled");
@@ -288,7 +316,7 @@ async fn download(client: &reqwest::Client, loc: &Location, dest: &Path, cancel:
         Location::Remote(url) => {
             let resp = client.get(url.clone()).send().await?.error_for_status()?;
             if let Some(len) = resp.content_length() {
-                rep.progress.total = Some(len);
+                rep.set_total(len);
             }
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -298,14 +326,14 @@ async fn download(client: &reqwest::Client, loc: &Location, dest: &Path, cancel:
                 let chunk = chunk?;
                 hasher.update(&chunk);
                 file.write_all(&chunk).await?;
-                rep.bytes(chunk.len() as u64);
+                rep.add_bytes(chunk.len() as u64);
             }
         }
         Location::Local(path) => {
             let mut src = tokio::fs::File::open(path)
                 .await
                 .map_err(|e| Error::msg(format!("Could not open {}: {e}", path.display())))?;
-            rep.progress.total = Some(src.metadata().await?.len());
+            rep.set_total(src.metadata().await?.len());
             let mut buf = vec![0u8; 256 * 1024];
             loop {
                 if cancel.load(Ordering::Relaxed) {
@@ -317,17 +345,16 @@ async fn download(client: &reqwest::Client, loc: &Location, dest: &Path, cancel:
                 }
                 hasher.update(&buf[..n]);
                 file.write_all(&buf[..n]).await?;
-                rep.bytes(n as u64);
+                rep.add_bytes(n as u64);
             }
         }
     }
     file.flush().await?;
-    rep.progress.percent = Some(100.0);
-    rep.emit();
+    rep.finished();
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progress: impl FnMut(usize, usize)) -> Result<()> {
+pub fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progress: impl FnMut(usize, usize)) -> Result<()> {
     let mut archive = zip::ZipArchive::new(BufReader::new(File::open(zip_path)?))
         .map_err(|e| Error::msg(format!("The download is not a valid zip file ({e}).")))?;
     std::fs::create_dir_all(dest)?;
@@ -464,7 +491,7 @@ pub fn uninstall(app: &AppHandle, id: &str) -> Result<()> {
     })
 }
 
-fn dir_size(path: &Path) -> u64 {
+pub fn dir_size(path: &Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(path) else { return 0 };
     rd.filter_map(|e| e.ok())
         .map(|e| match e.file_type() {
@@ -475,7 +502,7 @@ fn dir_size(path: &Path) -> u64 {
         .sum()
 }
 
-fn sanitize(s: &str) -> String {
+pub fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
 }
 

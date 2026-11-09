@@ -32,6 +32,9 @@ pub struct LauncherConfig {
     pub catalog_url: String,
     #[serde(default)]
     pub rss_url: Option<String>,
+    /// Where the launcher's own `version.json` lives (enables self-update).
+    #[serde(default)]
+    pub update_url: Option<String>,
     #[serde(default)]
     pub theme: Theme,
 }
@@ -76,6 +79,14 @@ impl LoadedConfig {
 
     pub fn rss_location(&self) -> Option<Result<Location>> {
         let url = self.config.rss_url.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(Location::parse(url, self.base.as_ref()))
+    }
+
+    pub fn update_location(&self) -> Option<Result<Location>> {
+        let url = self.config.update_url.as_deref()?.trim();
         if url.is_empty() {
             return None;
         }

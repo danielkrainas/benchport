@@ -35,6 +35,7 @@ Linux needs the usual [Tauri prerequisites](https://tauri.app/start/prerequisite
      "logo": "https://example.com/logo.png",
      "catalogUrl": "https://example.com/catalog.json",
      "rssUrl": "https://example.com/news.xml",
+     "updateUrl": "https://example.com/launcher/version.json",
      "theme": { "primary": "#14161b", "accent": "#4a90d9" }
    }
    ```
@@ -58,7 +59,7 @@ looked up in this order:
 | 4 | *debug builds only:* `examples/launcher.json` |
 | 5 | the compiled-in `src-tauri/launcher.json` |
 
-`catalogUrl`, `rssUrl` and `logo` may be `https://` URLs, `file://` URLs or
+`catalogUrl`, `rssUrl`, `updateUrl` and `logo` may be `https://` URLs, `file://` URLs or
 plain paths (relative paths resolve against the config file).
 
 ## Catalog format
@@ -125,6 +126,60 @@ Launchers check the catalog at startup, every 30 minutes, and when the player
 clicks **Check now**. By default updates install automatically. A game that is
 running gets updated after it closes.
 
+## Updating the launcher itself
+
+When `updateUrl` is set in `launcher.json`, the launcher keeps itself up to date
+from a static `version.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "minimumVersion": "0.1.5",
+  "released": "2026-11-08",
+  "notes": "Faster downloads\nFixed a crash on exit",
+  "page": "https://example.com/download",
+  "platforms": {
+    "linux":   { "url": "Benchport_0.2.0_amd64.AppImage", "sha256": "…", "size": 91234567 },
+    "windows": { "url": "benchport-0.2.0-windows.zip", "sha256": "…", "executable": "benchport.exe" },
+    "macos":   { "url": "Benchport-0.2.0-macos.zip", "sha256": "…" }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | The current launcher release. It's offered to any launcher reporting an older version (compared numerically: `0.10.0` > `0.9.2`, and `1.0.0-beta` < `1.0.0`). |
+| `minimumVersion` | *Optional.* Launchers older than this are **required** to update. Games can't be installed or played until they do. This is only enforced when the update can actually be installed, either automatically or via `page`. |
+| `platforms` | One build per OS: `linux`, `windows`, `macos`, or `<os>-<arch>` such as `macos-aarch64` (the more specific key wins). With no entry for its platform, a launcher isn't offered the update. |
+| `sha256` | **Required.** The launcher never replaces itself with unverified bytes. |
+| `url` | The raw executable/AppImage, or a zip containing it (`executable` names it if it isn't called the same as the running file). On macOS it must be a zip containing the `.app` bundle. Relative URLs resolve against `version.json`. |
+| `notes`, `released` | Shown to the player. |
+| `page` | *Optional.* A manual download page, linked when the launcher can't update itself. |
+| `allowDowngrade` | *Optional.* Also offer `version` to launchers that are *newer*, for pulling a bad release. |
+
+The launcher checks at startup, every 30 minutes, and from Settings → **Check now**.
+New builds download in the background (Settings has a toggle for this) and are swapped
+in either when the player clicks **Restart to update**, or silently the next time the
+launcher is closed. Restarting waits until no games are running and no downloads
+are in progress.
+
+To publish a launcher release (once per platform):
+
+```bash
+python3 tools/publish-launcher.py path/to/version.json 0.2.0 \
+    src-tauri/target/release/bundle/appimage/Benchport_0.2.0_amd64.AppImage \
+    --platform linux --notes "What changed" [--minimum 0.1.5] [--page https://…]
+# then upload the AppImage + version.json
+```
+
+Bump `version` in `src-tauri/tauri.conf.json` (and `Cargo.toml`) before building. That's the version the launcher reports.
+
+**What can update itself:** the Linux AppImage, Windows, and macOS `.app` installs in
+a folder the user can write to. Installs in system locations, like the `.deb`/`.rpm`
+packages in `/usr/bin` or an MSI under `Program Files`, can't replace themselves. They
+show the update with a link to `page`. Debug builds never replace themselves; set
+`BENCHPORT_ALLOW_SELF_UPDATE=1` to test the flow.
+
 ## How it behaves
 
 - **Offline:** the last good catalog and news feed are cached. Installed
@@ -143,13 +198,14 @@ src-tauri/src/
   catalog.rs    catalog model, per-platform build resolution
   location.rs   URL / local path handling, relative resolution
   installer.rs  download → verify → extract → swap, auto-updates
+  selfupdate.rs launcher self-update from version.json
   runner.rs     launching games, play-time tracking
   library.rs    persisted library state
   news.rs       RSS/Atom parsing
   lib.rs        Tauri commands + app setup
 ui/             index.html, styles.css, js/ (app, views, store, util, icons)
 examples/       demo config + generator for a local demo catalog
-tools/          publish.py
+tools/          publish.py (games), publish-launcher.py (launcher releases)
 ```
 
 Run the tests with `cd src-tauri && cargo test`.
