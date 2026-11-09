@@ -8,6 +8,8 @@ lets them add games to their library, installs them with one click, verifies
 every download (sha256), and keeps them updated automatically whenever you bump
 a version number. An optional RSS feed powers the News tab.
 
+![Benchport running the demo catalog: home page with a featured game, library sidebar and recently played](docs/screenshot.png)
+
 Built with Rust + [Tauri 2](https://tauri.app). The UI is plain HTML/CSS/JS
 (no bundler) in `ui/`.
 
@@ -247,6 +249,7 @@ src-tauri/src/
 ui/             index.html, styles.css, js/ (app, views, store, util, icons)
 examples/       demo config + generator for a local demo catalog
 tools/          publish.py (games), publish-launcher.py (launcher releases)
+docs/           README screenshot
 ```
 
 Run the tests with `cd src-tauri && cargo test`.
