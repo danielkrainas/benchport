@@ -1,7 +1,7 @@
 //! Download → verify sha256 → extract → swap into place → record version.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -417,6 +417,7 @@ pub fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progres
         #[cfg(unix)]
         if mode.is_some_and(|m| m & 0o170000 == 0o120000) {
             // Symlink (common inside macOS .app bundles).
+            use std::io::Read;
             let mut target = String::new();
             entry.read_to_string(&mut target)?;
             if !Path::new(&target).is_absolute() {

@@ -487,10 +487,15 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
 #[cfg(any(windows, target_os = "linux"))]
 fn register_protocol(app: &AppHandle) {
     use tauri_plugin_deep_link::DeepLinkExt;
+    // `Env::appimage` only exists on Linux.
+    #[cfg(windows)]
+    let self_register = true;
+    #[cfg(target_os = "linux")]
+    let self_register = app.env().appimage.is_some();
     let wanted = if cfg!(debug_assertions) {
         std::env::var("TOYBOX_REGISTER_PROTOCOL").as_deref() == Ok("1")
     } else {
-        cfg!(windows) || app.env().appimage.is_some()
+        self_register
     };
     if wanted {
         if let Err(e) = app.deep_link().register_all() {
