@@ -253,28 +253,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "benchport"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "feed-rs",
- "futures-util",
- "hex",
- "reqwest 0.12.28",
- "self-replace",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "thiserror 2.0.21",
- "tokio",
- "url",
- "zip",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4332,6 +4310,28 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "toybox"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "feed-rs",
+ "futures-util",
+ "hex",
+ "reqwest 0.12.28",
+ "self-replace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "zip",
+]
 
 [[package]]
 name = "tracing"

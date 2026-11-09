@@ -1,4 +1,4 @@
-# Benchport
+# Toybox
 
 A lightweight, brandable game launcher for sharing prototype builds with friends,
 family and small playtest groups — no zips over email, no accounts, no backend.
@@ -8,7 +8,7 @@ lets them add games to their library, installs them with one click, verifies
 every download (sha256), and keeps them updated automatically whenever you bump
 a version number. An optional RSS feed powers the News tab.
 
-![Benchport running the demo catalog: home page with a featured game, library sidebar and recently played](docs/screenshot.png)
+![Toybox running the demo catalog: home page with a featured game, library sidebar and recently played](docs/screenshot.png)
 
 Built with Rust + [Tauri 2](https://tauri.app). The UI is plain HTML/CSS/JS
 (no bundler) in `ui/`.
@@ -55,7 +55,7 @@ looked up in this order:
 
 | Priority | Location |
 |---|---|
-| 1 | `$BENCHPORT_CONFIG` (path to a JSON file) |
+| 1 | `$TOYBOX_CONFIG` (path to a JSON file) |
 | 2 | `launcher.json` next to the executable |
 | 3 | `launcher.json` in the user config dir (Settings → Configuration shows the path) |
 | 4 | *debug builds only:* `examples/launcher.json` |
@@ -169,9 +169,9 @@ from a static `version.json`:
   "notes": "Faster downloads\nFixed a crash on exit",
   "page": "https://example.com/download",
   "platforms": {
-    "linux":   { "url": "Benchport_0.2.0_amd64.AppImage", "sha256": "…", "size": 91234567 },
-    "windows": { "url": "benchport-0.2.0-windows.zip", "sha256": "…", "executable": "benchport.exe" },
-    "macos":   { "url": "Benchport-0.2.0-macos.zip", "sha256": "…" }
+    "linux":   { "url": "Toybox_0.2.0_amd64.AppImage", "sha256": "…", "size": 91234567 },
+    "windows": { "url": "toybox-0.2.0-windows.zip", "sha256": "…", "executable": "toybox.exe" },
+    "macos":   { "url": "Toybox-0.2.0-macos.zip", "sha256": "…" }
   }
 }
 ```
@@ -197,7 +197,7 @@ To publish a launcher release (once per platform):
 
 ```bash
 python3 tools/publish-launcher.py path/to/version.json 0.2.0 \
-    src-tauri/target/release/bundle/appimage/Benchport_0.2.0_amd64.AppImage \
+    src-tauri/target/release/bundle/appimage/Toybox_0.2.0_amd64.AppImage \
     --platform linux --notes "What changed" [--minimum 0.1.5] [--page https://…]
 # then upload the AppImage + version.json
 ```
@@ -242,7 +242,7 @@ shouldn't trigger the warning again (unverified on Windows and macOS).
 a folder the user can write to. Installs in system locations, like the `.deb`/`.rpm`
 packages in `/usr/bin` or an MSI under `Program Files`, can't replace themselves. They
 show the update with a link to `page`. Debug builds never replace themselves; set
-`BENCHPORT_ALLOW_SELF_UPDATE=1` to test the flow.
+`TOYBOX_ALLOW_SELF_UPDATE=1` to test the flow.
 
 ## How it behaves
 

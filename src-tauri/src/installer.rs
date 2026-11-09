@@ -632,7 +632,7 @@ mod tests {
     use std::io::Write;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("benchport-test-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("toybox-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

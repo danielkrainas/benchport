@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Publish a new launcher build into a Benchport version.json.
+"""Publish a new launcher build into a Toybox version.json.
 
-    python3 tools/publish-launcher.py version.json 0.2.0 path/to/Benchport_0.2.0_amd64.AppImage \
-        --platform linux [--url https://cdn.example.com/launcher/Benchport_0.2.0_amd64.AppImage] \
-        [--executable benchport.exe] [--notes "What changed"] [--minimum 0.1.5] [--page https://…]
+    python3 tools/publish-launcher.py version.json 0.2.0 path/to/Toybox_0.2.0_amd64.AppImage \
+        --platform linux [--url https://cdn.example.com/launcher/Toybox_0.2.0_amd64.AppImage] \
+        [--executable toybox.exe] [--notes "What changed"] [--minimum 0.1.5] [--page https://…]
 
 Run it once per platform build. It computes the artifact's sha256 + size,
 records it under "platforms", sets "version"/"released", and leaves other

@@ -468,7 +468,7 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
     }
 
     let client = reqwest::Client::builder()
-        .user_agent(concat!("Benchport/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Toybox/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(60))
         .build()?;
@@ -551,7 +551,7 @@ pub fn run() {
             restart_to_update,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Benchport")
+        .expect("error while building Toybox")
         .run(|app, event| {
             // A downloaded launcher update is installed when the app closes.
             if let RunEvent::Exit = event {

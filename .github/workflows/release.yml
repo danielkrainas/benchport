@@ -123,8 +123,8 @@ jobs:
 
       # Collect installers plus the files the launcher's self-updater consumes:
       #   linux   → the AppImage itself
-      #   windows → a portable zip containing benchport.exe
-      #   macos   → a zip of Benchport.app
+      #   windows → a portable zip containing toybox.exe
+      #   macos   → a zip of Toybox.app
       - name: Collect artifacts
         shell: bash
         run: |
@@ -138,19 +138,19 @@ jobs:
               ;;
             windows-*)
               cp "$bundle"/nsis/*.exe "$bundle"/msi/*.msi dist/
-              7z a -tzip "dist/Benchport_${VERSION}_windows_x64_portable.zip" "./src-tauri/$out/benchport.exe"
+              7z a -tzip "dist/Toybox_${VERSION}_windows_x64_portable.zip" "./src-tauri/$out/toybox.exe"
               ;;
             macos-*)
               arch="${{ matrix.name }}"; arch="${arch#macos-}"
               cp "$bundle"/dmg/*.dmg dist/
-              ditto -c -k --sequesterRsrc --keepParent "$bundle/macos/Benchport.app" "dist/Benchport_${VERSION}_macos_${arch}.app.zip"
+              ditto -c -k --sequesterRsrc --keepParent "$bundle/macos/Toybox.app" "dist/Toybox_${VERSION}_macos_${arch}.app.zip"
               ;;
           esac
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: benchport-${{ matrix.name }}
+          name: toybox-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
 
@@ -171,7 +171,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: benchport-*
+          pattern: toybox-*
           merge-multiple: true
 
       - name: Write version.json
@@ -185,9 +185,9 @@ jobs:
               --platform "$platform" --url "$base/$file" --page "$page" "$@"
           }
           publish linux "$(cd dist && ls *.AppImage)"
-          publish windows "Benchport_${VERSION}_windows_x64_portable.zip" --executable benchport.exe
-          publish macos-aarch64 "Benchport_${VERSION}_macos_aarch64.app.zip"
-          publish macos-x86_64 "Benchport_${VERSION}_macos_x86_64.app.zip"
+          publish windows "Toybox_${VERSION}_windows_x64_portable.zip" --executable toybox.exe
+          publish macos-aarch64 "Toybox_${VERSION}_macos_aarch64.app.zip"
+          publish macos-x86_64 "Toybox_${VERSION}_macos_x86_64.app.zip"
           cat dist/version.json
 
       - name: Create or update the draft release
@@ -196,6 +196,6 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --draft --title "Benchport $VERSION" --generate-notes \
+            gh release create "$TAG" dist/* --draft --title "Toybox $VERSION" --generate-notes \
               $([[ "$VERSION" == *-* ]] && echo --prerelease)
           fi

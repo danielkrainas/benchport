@@ -1,7 +1,7 @@
-# Benchport Design Doc
+# Toybox Design Doc
 
 ### Purpose
-Benchport is a lightweight, generic launcher for distributing prototype / early builds to non-technical people (friends, family, small playtesters) without emailing zips.  
+Toybox is a lightweight, generic launcher for distributing prototype / early builds to non-technical people (friends, family, small playtesters) without emailing zips.  
 
 User runs the launcher and it points at a remote JSON catalog + optional RSS feed. From there they can browse available games, install them, and receive automatic updates. The launcher is fully brandable (name, logo, colors) and intended to be open-sourced so indie studios or other groups can reuse it.
 
@@ -27,7 +27,7 @@ The launcher is a thin client. All intelligence lives in a remote `catalog.json`
 **Launcher config** (local, user or developer editable):
 ```json
 {
-  "name": "Benchport",
+  "name": "Toybox",
   "logo": "https://example.com/logo.png",
   "catalogUrl": "https://example.com/catalog.json",
   "rssUrl": "https://example.com/news.xml",

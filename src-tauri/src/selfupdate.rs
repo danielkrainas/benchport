@@ -13,9 +13,9 @@
 //!   "page": "https://example.com/download",
 //!   "allowDowngrade": false,
 //!   "platforms": {
-//!     "linux":          { "url": "Benchport_0.2.0_amd64.AppImage", "sha256": "…", "size": 123 },
-//!     "windows":        { "url": "benchport-0.2.0-windows.zip", "sha256": "…", "executable": "benchport.exe" },
-//!     "macos-aarch64":  { "url": "Benchport-0.2.0-macos.zip", "sha256": "…" }
+//!     "linux":          { "url": "Toybox_0.2.0_amd64.AppImage", "sha256": "…", "size": 123 },
+//!     "windows":        { "url": "toybox-0.2.0-windows.zip", "sha256": "…", "executable": "toybox.exe" },
+//!     "macos-aarch64":  { "url": "Toybox-0.2.0-macos.zip", "sha256": "…" }
 //!   }
 //! }
 //! ```
@@ -527,9 +527,9 @@ enum Target {
 
 /// What on disk is "the launcher" for this install, if we may replace it.
 fn target() -> Result<Target> {
-    if cfg!(debug_assertions) && std::env::var("BENCHPORT_ALLOW_SELF_UPDATE").as_deref() != Ok("1") {
+    if cfg!(debug_assertions) && std::env::var("TOYBOX_ALLOW_SELF_UPDATE").as_deref() != Ok("1") {
         return Err(Error::msg(
-            "Development builds don't update themselves (set BENCHPORT_ALLOW_SELF_UPDATE=1 to test).",
+            "Development builds don't update themselves (set TOYBOX_ALLOW_SELF_UPDATE=1 to test).",
         ));
     }
     let exe = std::env::current_exe()?;
@@ -550,7 +550,7 @@ fn target() -> Result<Target> {
         Target::File(p) | Target::Bundle(p) => p,
     };
     let dir = path.parent().ok_or_else(|| Error::msg("Can't locate the launcher's folder."))?;
-    let probe = dir.join(format!(".benchport-write-test-{}", std::process::id()));
+    let probe = dir.join(format!(".toybox-write-test-{}", std::process::id()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
@@ -685,7 +685,7 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("benchport-su-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("toybox-su-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn stages_raw_binary_and_swaps_it_in() {
         let root = tmpdir("raw");
-        let target = root.join("install/benchport");
+        let target = root.join("install/toybox");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, "old").unwrap();
         let dl = root.join("upd");
@@ -718,14 +718,14 @@ mod tests {
     fn stages_executable_from_wrapped_zip() {
         use std::io::Write;
         let root = tmpdir("zip");
-        let target = root.join("benchport");
+        let target = root.join("toybox");
         std::fs::write(&target, "old").unwrap();
         let dl = root.join("upd");
         std::fs::create_dir_all(&dl).unwrap();
         let zp = dl.join("download.part");
         let mut z = zip::ZipWriter::new(std::fs::File::create(&zp).unwrap());
-        z.start_file("Benchport-0.2.0/README.txt", zip::write::SimpleFileOptions::default()).unwrap();
-        z.start_file("Benchport-0.2.0/benchport", zip::write::SimpleFileOptions::default()).unwrap();
+        z.start_file("Toybox-0.2.0/README.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        z.start_file("Toybox-0.2.0/toybox", zip::write::SimpleFileOptions::default()).unwrap();
         z.write_all(b"zipped build").unwrap();
         z.finish().unwrap();
 
@@ -741,15 +741,15 @@ mod tests {
     #[test]
     fn swaps_app_bundle() {
         let root = tmpdir("bundle");
-        let app = root.join("Benchport.app");
+        let app = root.join("Toybox.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
-        std::fs::write(app.join("Contents/MacOS/benchport"), "old").unwrap();
-        let new = root.join("staged/Benchport.app");
+        std::fs::write(app.join("Contents/MacOS/toybox"), "old").unwrap();
+        let new = root.join("staged/Toybox.app");
         std::fs::create_dir_all(new.join("Contents/MacOS")).unwrap();
-        std::fs::write(new.join("Contents/MacOS/benchport"), "new").unwrap();
+        std::fs::write(new.join("Contents/MacOS/toybox"), "new").unwrap();
         swap(&Staged::Bundle { bundle: new, target: app.clone() }).unwrap();
-        assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/benchport")).unwrap(), "new");
-        assert!(!root.join(".Benchport.app.old").exists());
+        assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/toybox")).unwrap(), "new");
+        assert!(!root.join(".Toybox.app.old").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

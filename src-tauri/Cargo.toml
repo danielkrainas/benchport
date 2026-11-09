@@ -1,5 +1,5 @@
 [package]
-name = "benchport"
+name = "toybox"
 version = "0.1.0"
 description = "A lightweight, brandable launcher for distributing prototype game builds"
 edition = "2021"
@@ -7,7 +7,7 @@ license = "MIT"
 rust-version = "1.77"
 
 [lib]
-name = "benchport_lib"
+name = "toybox_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -170,7 +170,7 @@ def screenshot_svg(g, n):
 GAME_HTML = """<!doctype html><meta charset="utf-8"><title>{name}</title>
 <style>html,body{{margin:0;height:100%;background:{bg};color:#fff;font:16px system-ui;display:grid;place-items:center;overflow:hidden}}
 canvas{{position:fixed;inset:0}}h1{{position:relative;font-size:48px;margin:0}}p{{position:relative;opacity:.7;text-align:center}}</style>
-<canvas id=c></canvas><div><h1>{name}</h1><p>v{version} — demo build launched by Benchport.<br>Close this tab whenever you like.</p></div>
+<canvas id=c></canvas><div><h1>{name}</h1><p>v{version} — demo build launched by Toybox.<br>Close this tab whenever you like.</p></div>
 <script>const c=document.getElementById('c'),x=c.getContext('2d');let W,H,b=[];function r(){{W=c.width=innerWidth;H=c.height=innerHeight}}r();onresize=r;
 for(let i=0;i<40;i++)b.push({{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,r:4+Math.random()*14}});
 (function f(){{x.clearRect(0,0,W,H);for(const p of b){{p.x+=p.vx;p.y+=p.vy;if(p.x<0||p.x>W)p.vx*=-1;if(p.y<0||p.y>H)p.vy*=-1;x.beginPath();x.arc(p.x,p.y,p.r,0,7);x.fillStyle='hsla({hue},80%,65%,.5)';x.fill()}}requestAnimationFrame(f)}})()</script>"""

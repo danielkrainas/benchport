@@ -1,7 +1,7 @@
 //! Launcher configuration (branding + where the catalog/news live).
 //!
 //! Lookup order (first match wins):
-//!   1. `$BENCHPORT_CONFIG` (path to a JSON file)
+//!   1. `$TOYBOX_CONFIG` (path to a JSON file)
 //!   2. `launcher.json` next to the launcher executable
 //!   3. `launcher.json` in the per-user app config directory
 //!   4. (debug builds only) `examples/launcher.json` from the repo
@@ -100,7 +100,7 @@ pub fn user_config_path(app: &AppHandle) -> Option<PathBuf> {
 
 pub fn load(app: &AppHandle) -> LoadedConfig {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("BENCHPORT_CONFIG") {
+    if let Ok(p) = std::env::var("TOYBOX_CONFIG") {
         if !p.trim().is_empty() {
             candidates.push(PathBuf::from(p));
         }

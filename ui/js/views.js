@@ -711,7 +711,7 @@ export function settingsPage() {
 
     <section class="set-group"><h2>About</h2>
       ${row(esc(c?.name), `${c?.tagline ? esc(c.tagline) + '<br>' : ''}Version ${esc(c?.appVersion)} · ${esc(platformName(c?.platform))}`)}
-      ${row('Powered by Benchport', 'An open-source launcher for sharing early game builds with playtesters.')}
+      ${row('Powered by Toybox', 'An open-source launcher for sharing early game builds with playtesters.')}
     </section>
   </div>`;
 }

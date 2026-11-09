@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a new build into a Benchport catalog.
+"""Publish a new build into a Toybox catalog.
 
     python3 tools/publish.py catalog.json jump-test 0.3.2 path/to/JumpTest.zip \
         [--url https://cdn.example.com/builds/jump-test-0.3.2.zip] \

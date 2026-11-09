@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Benchport",
+  "productName": "Toybox",
   "version": "0.1.0",
-  "identifier": "dev.benchport.launcher",
+  "identifier": "dev.toybox.launcher",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Benchport",
+        "title": "Toybox",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
