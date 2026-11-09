@@ -1,7 +1,7 @@
 // Pure render functions: state in, HTML string out.
 
 import { icon } from './icons.js';
-import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel } from './store.js';
+import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel, isWeb, playable } from './store.js';
 import { esc, cssUrl, hashHue, initials, bytes, playtime, ago, niceDate, eta, platformName } from './util.js';
 
 // ---------------------------------------------------------------- pieces
@@ -87,15 +87,16 @@ export function actionButton(id, size = '') {
         <button class="cancel" data-action="cancel" ${a} title="Cancel">${icon('x')}</button>
       </div>`;
     case 'running':
-      return `<button class="btn ghost${sz}" data-action="stop" ${a}>${icon('stop')} Stop</button>`;
+      return `<button class="btn ghost${sz}" data-action="stop" ${a}>${icon('stop')} ${g?.kind === 'web' ? 'Close' : 'Stop'}</button>`;
     case 'installed':
-      return `<button class="btn play${sz}" data-action="play" ${a}>${icon('play')} Play</button>`;
+      return `<button class="btn play${sz}" data-action="play" ${a}>${icon(g?.opensInBrowser ? 'external' : 'play')} Play</button>`;
     case 'update':
       return `<button class="btn update${sz}" data-action="install" ${a}>${icon('update')} Update</button>`;
     case 'unavailable':
       return `<button class="btn${sz}" disabled>Not available on ${esc(platformName(S.config?.platform))}</button>`;
     default:
       if (g?.orphan) return `<button class="btn${sz}" disabled>Unavailable</button>`;
+      if (g?.kind === 'web') return `<button class="btn primary${sz}" data-action="add" ${a}>${icon('plus')} Add to library</button>`;
       return `<button class="btn primary${sz}" data-action="install" ${a}>${icon('download')} Install</button>`;
   }
 }
@@ -106,18 +107,20 @@ function statusPill(id) {
   switch (status(id)) {
     case 'installing': return `<span class="pill dl" data-prog-pct="${esc(id)}">${job?.percent != null ? Math.floor(overallPercent(job)) + '%' : '…'}</span>`;
     case 'running': return `<span class="pill ok">Playing</span>`;
-    case 'installed': return `<span class="pill ok">Installed</span>`;
+    case 'installed': return isWeb(id) ? `<span class="pill ok">In library</span>` : `<span class="pill ok">Installed</span>`;
     case 'update': return `<span class="pill upd">Update</span>`;
     case 'owned': return `<span class="pill muted">In library</span>`;
     case 'unavailable': return `<span class="pill muted">Not on ${esc(platformName(S.config?.platform))}</span>`;
-    default: return g?.version ? `<span class="pill muted">v${esc(g.version)}</span>` : '';
+    default:
+      if (g?.kind === 'web') return `<span class="pill muted">Browser game</span>`;
+      return g?.version ? `<span class="pill muted">v${esc(g.version)}</span>` : '';
   }
 }
 
 function hoverAction(id) {
   const a = `data-id="${esc(id)}"`;
   switch (status(id)) {
-    case 'none': return `<button class="btn sm subtle" data-action="add" ${a}>${icon('plus')} Library</button>`;
+    case 'none': return `<button class="btn sm ${isWeb(id) ? 'primary' : 'subtle'}" data-action="add" ${a}>${icon('plus')} Library</button>`;
     case 'owned': return `<button class="btn sm primary" data-action="install" ${a}>${icon('download')} Install</button>`;
     case 'installed': return `<button class="btn sm play" data-action="play" ${a}>${icon('play')} Play</button>`;
     case 'update': return `<button class="btn sm update" data-action="install" ${a}>${icon('update')} Update</button>`;
@@ -299,7 +302,7 @@ export function spotlight() {
   const st = status(g.id);
   const kicker = st === 'update' ? `<span class="chip glass">${icon('sparkle')} New version · v${esc(g.version)}</span>`
     : g.featured ? `<span class="chip glass">${icon('sparkle')} Featured</span>`
-    : `<span class="chip glass">v${esc(g.version)}</span>`;
+    : `<span class="chip glass">${g.kind === 'web' ? 'Browser game' : `v${esc(g.version)}`}</span>`;
   const note = st === 'installed' ? 'Ready to play' : st === 'running' ? 'Now playing' : '';
   const thumbs = list.length > 1
     ? `<div class="spot-list">${list.map((t, j) => `
@@ -348,7 +351,7 @@ export function homePage() {
   }
 
   const recent = libraryIds()
-    .filter((id) => entry(id)?.installed && entry(id)?.lastPlayed)
+    .filter((id) => playable(id) && entry(id)?.lastPlayed)
     .sort((a, b) => entry(b).lastPlayed - entry(a).lastPlayed)
     .slice(0, 3);
   const updates = updatesAvailable();
@@ -389,11 +392,11 @@ export function libraryPage() {
   }
   const counts = {
     all: ids.length,
-    installed: ids.filter((id) => entry(id)?.installed).length,
+    installed: ids.filter(playable).length,
     updates: ids.filter((id) => status(id) === 'update').length,
-    notInstalled: ids.filter((id) => !entry(id)?.installed).length,
+    notInstalled: ids.filter((id) => !playable(id)).length,
   };
-  const filters = { all: () => true, installed: (id) => !!entry(id)?.installed, updates: (id) => status(id) === 'update', notInstalled: (id) => !entry(id)?.installed };
+  const filters = { all: () => true, installed: playable, updates: (id) => status(id) === 'update', notInstalled: (id) => !playable(id) };
   const sorters = {
     name: (a, b) => (game(a)?.name || a).localeCompare(game(b)?.name || b),
     recent: (a, b) => (entry(b)?.lastPlayed || 0) - (entry(a)?.lastPlayed || 0),
@@ -407,9 +410,9 @@ export function libraryPage() {
 
   return `${offlineBanner()}<div class="page">
     <div class="page-head">
-      <div><h1>Library</h1><div class="sub">${counts.installed} installed · ${bytes(totalSize)} on disk</div></div>
+      <div><h1>Library</h1><div class="sub">${counts.installed} ready to play · ${bytes(totalSize)} on disk</div></div>
       <div class="toolbar">
-        <div class="seg">${chip('all', 'All')}${chip('installed', 'Installed')}${counts.updates ? chip('updates', 'Updates') : ''}${counts.notInstalled ? chip('notInstalled', 'Not installed') : ''}</div>
+        <div class="seg">${chip('all', 'All')}${chip('installed', 'Ready to play')}${counts.updates ? chip('updates', 'Updates') : ''}${counts.notInstalled ? chip('notInstalled', 'Not installed') : ''}</div>
         <select class="select" data-change="lib-sort">${opt('name', 'Name')}${opt('recent', 'Recently played')}${opt('added', 'Recently added')}${opt('playtime', 'Play time')}</select>
       </div>
     </div>
@@ -431,8 +434,12 @@ export function gamePage(id) {
   const job = S.jobs.get(id);
   const a = `data-id="${esc(id)}"`;
 
+  const web = g.kind === 'web';
   const stats = [];
-  if (inst) {
+  if (web) {
+    if (e) stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
+    stats.push(['Runs in', g.opensInBrowser ? 'Your browser' : 'The launcher']);
+  } else if (inst) {
     stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
     stats.push(['Version', st === 'update' ? `<span class="upd">v${esc(inst.version)} → v${esc(g.version)}</span>` : `v${esc(inst.version)}`]);
     stats.push(['Size', bytes(inst.sizeBytes)]);
@@ -443,6 +450,7 @@ export function gamePage(id) {
   }
 
   const menuItems = [];
+  if (web && g.playUrl && /^https?:/i.test(g.playUrl) && !g.opensInBrowser) menuItems.push(`<button data-action="open-url" data-url="${esc(g.playUrl)}">${icon('external')} Open in browser</button>`);
   if (st === 'update') menuItems.push(`<button data-action="play" ${a}>${icon('play')} Play installed version</button>`);
   if (inst) {
     menuItems.push(`<button data-action="open-folder" ${a}>${icon('folder')} Open install folder</button>`);
@@ -479,11 +487,11 @@ export function gamePage(id) {
         ${iconArt(g, 'gi', '32px')}
         <div>
           <h1>${esc(g.name)}</h1>
-          <div class="by">${g.developer ? `<span>${esc(g.developer)}</span><span class="dot-sep"></span>` : ''}<span>v${esc(g.version)}</span>${g.tags?.length ? `<span class="dot-sep"></span><span>${g.tags.slice(0, 3).map(esc).join(', ')}</span>` : ''}</div>
+          <div class="by">${g.developer ? `<span>${esc(g.developer)}</span><span class="dot-sep"></span>` : ''}<span>${web ? 'Browser game' : `v${esc(g.version)}`}</span>${g.tags?.length ? `<span class="dot-sep"></span><span>${g.tags.slice(0, 3).map(esc).join(', ')}</span>` : ''}</div>
         </div>
       </div>
       <div class="action-bar">
-        <div class="acts">${actionButton(id, 'lg')}${!e && st === 'none' ? `<button class="btn lg ghost" data-action="add" ${a}>${icon('plus')} Add to library</button>` : ''}</div>
+        <div class="acts">${actionButton(id, 'lg')}${!e && st === 'none' && !web ? `<button class="btn lg ghost" data-action="add" ${a}>${icon('plus')} Add to library</button>` : ''}</div>
         ${st === 'installing'
           ? `<div class="stats"><div class="stat" style="flex:1;max-width:420px"><div class="k">${job?.isUpdate ? `Updating to v${esc(job.version)}` : 'Installing'}</div>${bar(id, job)}<div class="dl-detail" data-prog-detail="${esc(id)}">${esc(progressDetail(job))}</div></div></div>`
           : `<div class="stats">${stats.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`}
@@ -494,19 +502,20 @@ export function gamePage(id) {
   <div class="game-body">
     <div>
       ${notices.join('')}
-      ${g.releaseNotes ? `<div class="block"><h2>What's new</h2><div class="release-notes"><span class="chip accent vtag">v${esc(g.version)}${g.released ? ` · ${esc(g.released)}` : ''}</span><div class="prose selectable">${esc(g.releaseNotes)}</div></div></div>` : ''}
+      ${g.releaseNotes ? `<div class="block"><h2>What's new</h2><div class="release-notes">${g.version || g.released ? `<span class="chip accent vtag">${[g.version && `v${esc(g.version)}`, g.released && esc(g.released)].filter(Boolean).join(' · ')}</span>` : ''}<div class="prose selectable">${esc(g.releaseNotes)}</div></div></div>` : ''}
       ${g.description ? `<div class="block"><h2>About this game</h2><div class="prose selectable">${esc(g.description)}</div></div>` : ''}
       ${shots}
     </div>
     <aside>
       <div class="side-card">
         ${kv('Developer', esc(g.developer || ''))}
+        ${kv('Type', web ? 'Browser game · no download' : '')}
         ${kv('Latest version', g.version ? `v${esc(g.version)}` : '')}
         ${kv('Released', esc(g.released || ''))}
         ${kv('Download size', g.size ? bytes(g.size) : '')}
-        ${kv('Installed', inst ? `v${esc(inst.version)}` : e ? 'Not installed' : '')}
+        ${kv('Installed', web ? '' : inst ? `v${esc(inst.version)}` : e ? 'Not installed' : '')}
         ${kv('Installed on', inst ? esc(ago(inst.installedAt)) : '')}
-        ${kv('Platform', esc(platformName(S.config?.platform)))}
+        ${kv('Platform', web ? 'Any' : esc(platformName(S.config?.platform)))}
         ${g.tags?.length ? `<div class="tags">${g.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
       </div>
       ${inst ? `<div class="side-card"><div class="kv"><span class="k">Location</span><button class="link" data-action="open-folder" ${a}>${icon('folder')} Open folder</button></div></div>` : ''}

@@ -35,8 +35,12 @@ pub struct Job {
     pub progress: Progress,
 }
 
-pub struct RunningGame {
-    pub child: Arc<Mutex<Child>>,
+#[derive(Clone)]
+pub enum RunningGame {
+    /// A native game process.
+    Process(Arc<Mutex<Child>>),
+    /// A browser game in a launcher window.
+    Window { label: String, started: u64 },
 }
 
 pub struct AppState {

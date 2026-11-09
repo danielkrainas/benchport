@@ -266,7 +266,9 @@ const actions = {
   async play({ id }) {
     S.menuOpen = null;
     await call('launch_game', { id });
-    toast({ title: `Launching ${game(id)?.name}`, sub: 'Have fun!', kind: 'ok', g: game(id), ms: 3000 });
+    const g = game(id);
+    if (g?.kind === 'web' && !g.opensInBrowser) return; // its window opens right away
+    toast({ title: `Launching ${g?.name}`, sub: g?.opensInBrowser ? 'Opening in your browser' : 'Have fun!', kind: 'ok', g, ms: 3000 });
   },
   async stop({ id }) {
     await call('stop_game', { id });

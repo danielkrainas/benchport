@@ -22,9 +22,19 @@ pub struct Catalog {
 pub struct Game {
     pub id: String,
     pub name: String,
+    /// Optional for browser games, which are always "latest".
+    #[serde(default)]
     pub version: String,
     #[serde(default)]
     pub description: String,
+    /// Browser game: the page to open. Such games are never downloaded;
+    /// relative URLs resolve against the catalog.
+    #[serde(default)]
+    pub play_url: Option<String>,
+    /// Where a browser game opens: "window" (default, a launcher window) or
+    /// "browser" (the system browser).
+    #[serde(default)]
+    pub open_in: Option<String>,
     #[serde(default)]
     pub download_url: Option<String>,
     #[serde(default)]
@@ -98,6 +108,9 @@ impl Game {
     }
 
     pub fn resolve_build(&self, base: Option<&Location>) -> Result<ResolvedBuild> {
+        if self.is_web() {
+            return Err(Error::msg(format!("{} is a browser game; there's nothing to install.", self.name)));
+        }
         let p = self.platform();
         let url = p
             .and_then(|p| p.download_url.clone())
@@ -117,7 +130,24 @@ impl Game {
         Ok(ResolvedBuild { download: Location::parse(&url, base)?, sha256, executable, args })
     }
 
+    pub fn is_web(&self) -> bool {
+        self.play_url.as_deref().is_some_and(|u| !u.trim().is_empty())
+    }
+
+    pub fn opens_in_browser(&self) -> bool {
+        self.open_in.as_deref().is_some_and(|o| o.eq_ignore_ascii_case("browser"))
+    }
+
+    /// The URL to load for a browser game.
+    pub fn play_location(&self, base: Option<&Location>) -> Result<Location> {
+        let url = self.play_url.as_deref().filter(|u| !u.trim().is_empty());
+        Location::parse(url.ok_or_else(|| Error::msg(format!("{} is not a browser game", self.name)))?, base)
+    }
+
     pub fn is_available(&self) -> bool {
+        if self.is_web() {
+            return true;
+        }
         let p = self.platform();
         let has_url = p.and_then(|p| p.download_url.as_ref()).or(self.download_url.as_ref()).is_some_and(|s| !s.trim().is_empty());
         let has_exe = p.and_then(|p| p.executable.as_ref()).or(self.executable.as_ref()).is_some_and(|s| !s.trim().is_empty());
@@ -168,6 +198,10 @@ pub struct GameView {
     pub featured: bool,
     /// False when the catalog has no build for this OS.
     pub available: bool,
+    /// "native" (downloaded + installed) or "web" (played from a URL).
+    pub kind: &'static str,
+    pub play_url: Option<String>,
+    pub opens_in_browser: bool,
 }
 
 impl GameView {
@@ -187,6 +221,9 @@ impl GameView {
             size: g.download_size(),
             featured: g.featured,
             available: g.is_available(),
+            kind: if g.is_web() { "web" } else { "native" },
+            play_url: g.is_web().then(|| g.play_location(base).ok()).flatten().map(|l| l.display()),
+            opens_in_browser: g.opens_in_browser(),
         }
     }
 }
@@ -222,6 +259,18 @@ mod tests {
         let c = parse(br#"{"games":[{"id":"a","name":"A","version":"1","platforms":{"nonexistent-os":{"downloadUrl":"x","executable":"y"}}}]}"#).unwrap();
         assert!(!c.games[0].is_available());
         assert!(c.games[0].resolve_build(None).is_err());
+    }
+
+    #[test]
+    fn browser_games_need_no_build() {
+        let c = parse(br#"{"games":[{"id":"w","name":"W","playUrl":"web/w/index.html"}]}"#).unwrap();
+        let g = &c.games[0];
+        assert!(g.is_web() && g.is_available() && !g.opens_in_browser());
+        assert!(g.resolve_build(None).is_err(), "browser games are never installed");
+        let base = Location::parse("https://cdn.example.com/catalog.json", None).unwrap();
+        assert_eq!(g.play_location(Some(&base)).unwrap().display(), "https://cdn.example.com/web/w/index.html");
+        let v = GameView::from_game(g, Some(&base));
+        assert_eq!((v.kind, v.version.as_str()), ("web", ""));
     }
 
     #[test]

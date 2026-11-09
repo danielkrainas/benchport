@@ -83,7 +83,8 @@ plain paths (relative paths resolve against the config file).
 ```
 
 Required: `id` (letters, digits, `-` `_` `.`), `name`, `version`, and a `downloadUrl` and
-`executable` (either at the top level or per platform). Everything else is optional:
+`executable` (either at the top level or per platform). Browser games are the exception: they
+only need a `playUrl` (see below). Everything else is optional:
 
 | Field | Purpose |
 |---|---|
@@ -97,6 +98,33 @@ Required: `id` (letters, digits, `-` `_` `.`), `name`, `version`, and a `downloa
 | `size` | Download size in bytes (used before the download starts). |
 | `featured` | `true` puts the game in the home page spotlight. |
 | `platforms` | Per-OS overrides: `{ "windows": { "downloadUrl", "sha256", "executable", "args", "size" }, "macos": {…}, "linux": {…} }`. |
+
+### Browser games
+
+Games that run in a web page, such as three.js, Babylon, PlayCanvas, Phaser or Godot/Unity web
+exports, skip the download entirely. Give them a `playUrl` instead of `downloadUrl`/`executable`:
+
+```json
+{
+  "id": "prism-garden",
+  "name": "Prism Garden",
+  "playUrl": "https://games.example.com/prism-garden/",
+  "openIn": "window",
+  "banner": "art/prism-banner.png"
+}
+```
+
+- Players get **Add to library** instead of Install, and then **Play**.
+- `openIn: "window"` (the default) opens the game in its own launcher window. The launcher
+  tracks the session like any other game: "Playing" state, a Close button, and play time.
+  `openIn: "browser"` hands the URL to the system browser instead.
+- `version` is optional. The page is always the latest build, so there are no installs or
+  updates to manage.
+- Relative `playUrl`s resolve against the catalog, so a game can sit in the same folder
+  (`"playUrl": "web/prism-garden/index.html"`). Local folders work for testing, but some
+  engines need to be served over http(s), for example to load modules or WASM.
+- Game windows have **no access to the launcher's internal commands**: Tauri's
+  permissions only cover the main window, so a page can't touch the library or files.
 
 Notes:
 
@@ -199,7 +227,7 @@ src-tauri/src/
   location.rs   URL / local path handling, relative resolution
   installer.rs  download → verify → extract → swap, auto-updates
   selfupdate.rs launcher self-update from version.json
-  runner.rs     launching games, play-time tracking
+  runner.rs     launching games (processes + browser-game windows), play-time tracking
   library.rs    persisted library state
   news.rs       RSS/Atom parsing
   lib.rs        Tauri commands + app setup

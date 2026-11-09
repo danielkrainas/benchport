@@ -183,7 +183,7 @@ fn pending_updates(st: &crate::state::AppState) -> Vec<String> {
     cat.catalog
         .games
         .iter()
-        .filter(|g| g.is_available())
+        .filter(|g| g.is_available() && !g.is_web())
         .filter(|g| {
             lib.games
                 .get(&g.id)

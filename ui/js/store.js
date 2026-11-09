@@ -49,8 +49,14 @@ export function game(id) {
   };
 }
 
+export const isWeb = (id) => catalogGame(id)?.kind === 'web';
+
+/** In the library and ready to play right now (installed, or a browser game). */
+export const playable = (id) => !!entry(id)?.installed || (isWeb(id) && !!entry(id));
+
 /**
  * none | owned | installing | installed | update | running | unavailable
+ * Browser games are only ever none | installed (= in library) | running.
  */
 export function status(id) {
   const job = S.jobs.get(id);
@@ -58,6 +64,7 @@ export function status(id) {
   if (S.running.has(id)) return 'running';
   const e = entry(id);
   const g = catalogGame(id);
+  if (g?.kind === 'web') return e ? 'installed' : 'none';
   if (e?.installed) {
     if (g && g.available && g.version !== e.installed.version) return 'update';
     return 'installed';

@@ -242,8 +242,9 @@ fn uninstall_game(app: AppHandle, id: String) -> Result<()> {
     installer::uninstall(&app, &id)
 }
 
+// async: creating a window from a sync (main-thread) command deadlocks on Windows.
 #[tauri::command]
-fn launch_game(app: AppHandle, id: String) -> Result<()> {
+async fn launch_game(app: AppHandle, id: String) -> Result<()> {
     selfupdate::require_current(&app)?;
     runner::launch(&app, &id)
 }
@@ -407,6 +408,12 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            // Closing the launcher also closes any open browser-game windows.
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.app_handle().exit(0);
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             let st = init_state(&handle)?;
@@ -456,6 +463,7 @@ pub fn run() {
         .run(|app, event| {
             // A downloaded launcher update is installed when the app closes.
             if let RunEvent::Exit = event {
+                runner::finish_web_sessions(app);
                 selfupdate::apply_on_exit(app);
             }
         });
