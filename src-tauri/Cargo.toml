@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-deep-link = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -28,6 +29,10 @@ zip = { version = "2", default-features = false, features = ["deflate", "deflate
 feed-rs = "2"
 url = "2"
 base64 = "0.22"
+
+# Forwards toybox:// links (and launch args) to the already-running launcher.
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [target.'cfg(windows)'.dependencies]
 # Replacing a running .exe needs special handling on Windows.

@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Generate a self-contained demo catalog under examples/demo/.
+"""Generate self-contained demo catalogs under examples/.
 
     python3 examples/make-demo.py
 
-Produces catalog.json, news.xml, artwork and playable demo zips, all
-referenced with *relative* paths so the launcher can use the folder straight
-from disk (see examples/launcher.json) or you can upload it to any static host
-as-is. Only the Python standard library is used.
+Produces two catalogs from two made-up publishers:
+
+  examples/demo/          "Bench Studio" — the launcher's built-in catalog in
+                          debug builds (see examples/launcher.json), plus news.xml
+  examples/demo-arcade/   "Night Shift Arcade" — a second publisher to add from
+                          Settings → Catalogs (or a toybox://add link) to try
+                          multi-catalog mode. It reuses the id "jump-test" on
+                          purpose: ids only need to be unique per catalog.
+
+Everything is referenced with *relative* paths, so a folder works straight
+from disk or uploaded to any static host as-is. Standard library only.
 """
 
 import hashlib
@@ -17,7 +24,28 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent / "demo"
+EXAMPLES = Path(__file__).resolve().parent
+ROOT = EXAMPLES / "demo"
+ARCADE_ROOT = EXAMPLES / "demo-arcade"
+
+# Top-level publisher info for each catalog (all fields optional).
+BENCH_META = {
+    "name": "Bench Studio playtests",
+    "publisher": "Bench Studio",
+    "description": "Early builds from Bench Studio. Play them, break them, tell us what you think.",
+    "website": "https://example.com/bench",
+    "supportUrl": "mailto:playtest@example.com",
+    "accent": "#4a90d9",
+    "icon": "art/catalog-icon.svg",
+}
+ARCADE_META = {
+    "name": "Night Shift Arcade",
+    "publisher": "Night Shift",
+    "description": "Small, strange arcade games from a two-person studio that works after dark.",
+    "website": "https://example.com/night-shift",
+    "accent": "#e0903a",
+    "icon": "art/catalog-icon.svg",
+}
 
 GAMES = [
     {
@@ -80,6 +108,34 @@ GAMES = [
         "shape": "prisms",
         "description": "A tiny three.js toy that runs right in the launcher — nothing to download. Click to grow crystals, drag to spin the garden.\n\nNeeds an internet connection (three.js loads from a CDN).",
         "releaseNotes": "Always the latest version: browser games update the moment the page does.",
+    },
+]
+
+ARCADE_GAMES = [
+    {
+        # Same id as Bench Studio's game: fine, ids are per catalog.
+        "id": "jump-test",
+        "name": "Night Jump",
+        "version": "2.1.0",
+        "developer": "Night Shift",
+        "tags": ["Platformer", "Arcade"],
+        "featured": True,
+        "hue": 40,
+        "shape": "platformer",
+        "description": "A one-screen arcade platformer where the floor goes out every eight seconds. How long can you stay up?",
+        "releaseNotes": "• New night-mode palette\n• Online scores removed (we never had a server)",
+    },
+    {
+        "id": "tide-pool",
+        "name": "Tide Pool",
+        "version": "0.4.2",
+        "developer": "Night Shift",
+        "tags": ["Puzzle", "Relaxing"],
+        "featured": False,
+        "hue": 185,
+        "shape": "grid",
+        "description": "Rearrange rock pools so every creature finds its way back to the sea before the tide comes in.",
+        "releaseNotes": "• 8 new pools\n• Hermit crabs now remember where they were",
     },
 ]
 
@@ -308,22 +364,23 @@ def sha256(path):
     return h.hexdigest()
 
 
-def main():
+def build_catalog(root, games, meta, catalog_hue):
     for sub in ("art", "builds"):
-        (ROOT / sub).mkdir(parents=True, exist_ok=True)
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "art" / "catalog-icon.svg").write_text(icon_svg({"name": meta["publisher"], "hue": catalog_hue}))
 
     entries = []
-    for g in GAMES:
-        (ROOT / "art" / f"{g['id']}-banner.svg").write_text(banner_svg(g))
-        (ROOT / "art" / f"{g['id']}-icon.svg").write_text(icon_svg(g))
+    for g in games:
+        (root / "art" / f"{g['id']}-banner.svg").write_text(banner_svg(g))
+        (root / "art" / f"{g['id']}-icon.svg").write_text(icon_svg(g))
         shots = []
         for n in range(3):
             name = f"{g['id']}-shot{n + 1}.svg"
-            (ROOT / "art" / name).write_text(screenshot_svg(g, n))
+            (root / "art" / name).write_text(screenshot_svg(g, n))
             shots.append(f"art/{name}")
 
         if g.get("web"):
-            page = ROOT / "web" / g["id"] / "index.html"
+            page = root / "web" / g["id"] / "index.html"
             page.parent.mkdir(parents=True, exist_ok=True)
             page.write_text(WEB_GAME_HTML)
             entries.append({
@@ -342,8 +399,8 @@ def main():
             continue
 
         zip_name = f"{g['id']}-{g['version']}.zip"
-        zip_path = ROOT / "builds" / zip_name
-        for old in (ROOT / "builds").glob(f"{g['id']}-*.zip"):
+        zip_path = root / "builds" / zip_name
+        for old in (root / "builds").glob(f"{g['id']}-*.zip"):
             if old != zip_path:
                 old.unlink()
         make_zip(g, zip_path)
@@ -368,8 +425,14 @@ def main():
             "featured": g["featured"],
         })
 
-    catalog = {"version": date.today().isoformat(), "games": entries}
-    (ROOT / "catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
+    catalog = {"version": date.today().isoformat(), **meta, "games": entries}
+    (root / "catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
+    print(f"Demo catalog written to {root}")
+
+
+def main():
+    build_catalog(ROOT, GAMES, BENCH_META, 210)
+    build_catalog(ARCADE_ROOT, ARCADE_GAMES, ARCADE_META, 30)
 
     now = datetime.now(timezone.utc)
     posts = [
@@ -398,7 +461,7 @@ def main():
   </channel>
 </rss>
 """)
-    print(f"Demo catalog written to {ROOT}")
+    print(f"\nTo try multi-catalog mode, add {ARCADE_ROOT / 'catalog.json'} in Settings → Catalogs.")
 
 
 if __name__ == "__main__":

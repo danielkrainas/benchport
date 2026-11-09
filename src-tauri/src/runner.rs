@@ -29,7 +29,7 @@ struct GameState {
 pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
     let st = state(app);
     if let Some((game, base)) = st.find_game(id).filter(|(g, _)| g.is_web()) {
-        return launch_web(app, &game, &base);
+        return launch_web(app, id, &game, &base);
     }
     if st.running.lock().unwrap().contains_key(id) {
         return Err(Error::msg("The game is already running."));
@@ -46,7 +46,7 @@ pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
                 .ok_or_else(|| Error::msg(format!("Version {v} is not installed.")))?,
             _ => e.and_then(|e| e.installed.clone()).ok_or_else(|| {
                 Error::msg(if st.find_game(id).is_none() {
-                    "This game was removed from the catalog and can't be played anymore."
+                    "This game isn't available from its catalog any more, and nothing of it is installed."
                 } else {
                     "This game is not installed."
                 })
@@ -133,14 +133,16 @@ pub fn finish_web_sessions(app: &AppHandle) {
     }
 }
 
-/// Window labels allow letters, digits, `-`, `/`, `:` and `_`.
-fn window_label(id: &str) -> String {
-    format!("play-{}", id.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "_"))
+/// A window label unique to the game (labels only allow a few characters, so
+/// the key is hashed rather than escaped, which could collide).
+fn window_label(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("play-{}", &hex::encode(Sha256::digest(key))[..16])
 }
 
 /// Browser games open in their own launcher window (or the system browser).
 /// The window gets no IPC permissions: capabilities only cover "main".
-fn launch_web(app: &AppHandle, game: &Game, base: &Location) -> Result<()> {
+fn launch_web(app: &AppHandle, key: &str, game: &Game, base: &Location) -> Result<()> {
     let st = state(app);
     let url = match game.play_location(Some(base))? {
         Location::Remote(u) => u,
@@ -150,14 +152,14 @@ fn launch_web(app: &AppHandle, game: &Game, base: &Location) -> Result<()> {
     if game.opens_in_browser() {
         app.opener().open_url(url.as_str(), None::<&str>).map_err(|e| Error::msg(format!("Couldn't open the browser: {e}")))?;
         st.update_library(app, |lib| {
-            let e = lib.entry(&game.id);
+            let e = lib.entry(key);
             e.name = Some(game.name.clone());
             e.last_played = Some(now());
         })?;
         return Ok(());
     }
 
-    let label = window_label(&game.id);
+    let label = window_label(key);
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -174,15 +176,15 @@ fn launch_web(app: &AppHandle, game: &Game, base: &Location) -> Result<()> {
         .map_err(|e| Error::msg(format!("Couldn't open the game window: {e}")))?;
 
     let started = now();
-    st.running.lock().unwrap().insert(game.id.clone(), RunningGame::Window { label, started });
+    st.running.lock().unwrap().insert(key.to_string(), RunningGame::Window { label, started });
     st.update_library(app, |lib| {
-        let e = lib.entry(&game.id);
+        let e = lib.entry(key);
         e.name = Some(game.name.clone());
         e.last_played = Some(started);
     })?;
-    let _ = app.emit("game://state", GameState { game_id: game.id.clone(), running: true, version: None, exit_code: None });
+    let _ = app.emit("game://state", GameState { game_id: key.to_string(), running: true, version: None, exit_code: None });
 
-    let (app2, id) = (app.clone(), game.id.clone());
+    let (app2, id) = (app.clone(), key.to_string());
     window.on_window_event(move |ev| {
         if let WindowEvent::Destroyed = ev {
             finish_session(&app2, &id, started, None, false);

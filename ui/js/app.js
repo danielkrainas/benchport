@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
-import { S, ACTIVE_PHASES, game, status, catalogGame, updatesAvailable, featured, entry, kept, libraryIds } from './store.js';
+import { S, ACTIVE_PHASES, game, status, catalogGame, updatesAvailable, featured, entry, kept, libraryIds, sources, source, sourceName, multi } from './store.js';
 import * as V from './views.js';
-import { applyTheme, esc } from './util.js';
+import { applyTheme, accentVars, esc } from './util.js';
 
 const T = window.__TAURI__;
 const invoke = T.core.invoke;
@@ -61,6 +61,140 @@ function confirmModal({ title, text, ok = 'Confirm', danger = false }) {
   });
 }
 let closeOverlay = null;
+
+// ---------------------------------------------------------------- adding catalogs
+
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const hostOf = (u) => { try { return new URL(u).host || u; } catch { return u; } };
+
+/**
+ * The "add a catalog" dialog: ask for a URL/path (unless given), fetch and
+ * describe it, and add it once confirmed. Also handles exported catalog
+ * lists. `fromLink`: opened by a toybox://add link, so it warns about trust
+ * and only accepts web addresses.
+ */
+function addCatalogFlow({ url = '', name = null, fromLink = false, importing = false } = {}) {
+  return new Promise((resolve) => {
+    if (!S.config?.allowAddingCatalogs) {
+      toast({ title: "Can't add catalogs", sub: `${S.config?.name || 'This launcher'} only uses its built-in catalog.`, kind: 'err' });
+      return resolve();
+    }
+    const ov = $('#overlay');
+    let closed = false;
+    let preview = null;
+    const close = () => {
+      closed = true;
+      ov.hidden = true;
+      ov.innerHTML = '';
+      ov.onclick = null;
+      closeOverlay = null;
+      resolve();
+    };
+    const show = (html, cls = '') => {
+      if (closed) return;
+      ov.innerHTML = `<div class="modal add-cat ${cls}" role="dialog">${html}</div>`;
+      ov.hidden = false;
+    };
+    closeOverlay = close;
+
+    const askUrl = (err = '') => {
+      show(`<h3>${importing ? 'Import a catalog list' : 'Add a catalog'}</h3>
+        <p>${importing ? 'Enter the path or URL of a <code>toybox-catalogs.json</code> file exported from another launcher.' : 'Paste the catalog address a publisher gave you (a local file path works too).'}</p>
+        <input class="input" id="cat-url" type="text" value="${esc(url)}" placeholder="${importing ? '/home/you/Downloads/toybox-catalogs.json' : 'https://example.com/catalog.json'}" spellcheck="false" autocomplete="off">
+        ${err ? `<p class="modal-err selectable">${esc(err)}</p>` : ''}
+        <div class="acts"><button class="btn ghost" data-m="cancel">Cancel</button><button class="btn primary" data-m="next">Continue</button></div>`);
+      const inp = $('#cat-url');
+      inp.focus();
+      inp.select();
+      inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); next(); } };
+    };
+    const next = () => {
+      const v = $('#cat-url')?.value.trim();
+      if (v) { url = v; check(); }
+    };
+    const failed = (msg) => {
+      if (!fromLink) return askUrl(msg);
+      show(`<h3>Couldn't add this catalog</h3><p class="selectable">${esc(msg)}</p><code class="cat-url selectable">${esc(url)}</code>
+        <div class="acts"><button class="btn primary" data-m="cancel">Close</button></div>`);
+    };
+    const check = async () => {
+      show(`<h3>Checking catalog…</h3><code class="cat-url selectable">${esc(url)}</code><div class="modal-spin"><span class="spinner"></span></div>
+        <div class="acts"><button class="btn ghost" data-m="cancel">Cancel</button></div>`);
+      try {
+        preview = await invoke('preview_source', { url, fromLink });
+      } catch (e) {
+        return failed(String(e));
+      }
+      confirmView();
+    };
+    const confirmView = () => {
+      const p = preview;
+      if (p.kind === 'list') {
+        const fresh = p.entries.filter((e) => !e.existing);
+        show(`<h3>Import ${plural(p.entries.length, 'catalog')}?</h3>
+          <div class="cat-list">${p.entries.map((e) => `<div class="cat-li${e.existing ? ' have' : ''}">
+            ${V.sourceIcon({ id: e.url, name: e.name || hostOf(e.url) })}<div class="grow"><div class="t">${esc(e.name || hostOf(e.url))}</div><code>${esc(e.url)}</code></div>
+            ${e.existing ? '<span class="pill muted">Already added</span>' : e.enabled ? '' : '<span class="pill muted">Off</span>'}</div>`).join('')}</div>
+          <p>Only import lists from people you trust: games from these catalogs run on your computer.</p>
+          <div class="acts"><button class="btn ghost" data-m="cancel">${fresh.length ? 'Cancel' : 'Close'}</button>${fresh.length ? `<button class="btn primary" data-m="import">Add ${plural(fresh.length, 'catalog')}</button>` : ''}</div>`);
+        return;
+      }
+      const title = p.name || name || p.publisher || hostOf(p.url);
+      const already = p.existing && p.existingEnabled;
+      const more = p.gameCount > p.games.length ? ', …' : '';
+      show(`<div class="cat-head">${V.sourceIcon({ id: p.url, name: title, icon: p.icon, accent: p.accent }, 'src-ic xl')}
+          <div><div class="kicker">${fromLink && !already ? 'Add this catalog?' : 'Catalog'}</div><h3>${esc(title)}</h3>${p.publisher && p.publisher !== title ? `<div class="pub">by ${esc(p.publisher)}</div>` : ''}</div></div>
+        ${p.description ? `<p>${esc(p.description)}</p>` : ''}
+        <div class="cat-games"><b>${plural(p.gameCount, 'game')}</b>${p.games.length ? ` — ${p.games.map(esc).join(', ')}${more}` : ''}</div>
+        <code class="cat-url selectable">${esc(p.url)}</code>
+        ${already ? `<p class="cat-note">${icon('check')} You already have this catalog.</p>`
+          : fromLink ? `<p class="cat-note warn">${icon('info')} A link asked to add this catalog to ${esc(S.config.name)}. Only add catalogs from people you trust: their games run on your computer.</p>` : ''}
+        <div class="acts"><button class="btn ghost" data-m="cancel">${already ? 'Close' : 'Cancel'}</button>${already ? '' : `<button class="btn primary" data-m="add">${p.existing ? 'Turn it on' : 'Add catalog'}</button>`}</div>`);
+      const m = ov.querySelector('.modal');
+      if (m && p.accent) m.setAttribute('style', accentVars(p.accent));
+    };
+    const add = async () => {
+      const p = preview;
+      const title = p.name || name || p.publisher || hostOf(p.url);
+      show(`<h3>Adding ${esc(title)}…</h3><div class="modal-spin"><span class="spinner"></span></div>`);
+      try {
+        await invoke('add_source', { url: p.url, name });
+      } catch (e) {
+        return failed(String(e));
+      }
+      close();
+      toast({ title: `Added ${title}`, sub: `${plural(p.gameCount, 'game')} — find them on the home page.`, kind: 'ok' });
+    };
+    const importAll = async () => {
+      show(`<h3>Adding catalogs…</h3><div class="modal-spin"><span class="spinner"></span></div>`);
+      try {
+        const n = await invoke('import_sources', { entries: preview.entries.map(({ url, name, enabled }) => ({ url, name, enabled })) });
+        close();
+        toast({ title: `Added ${plural(n, 'catalog')}`, kind: 'ok' });
+      } catch (e) {
+        failed(String(e));
+      }
+    };
+
+    ov.onclick = (e) => {
+      const b = e.target.closest('[data-m]');
+      const m = b?.dataset.m;
+      if (m === 'cancel' || (!b && e.target === ov)) close();
+      else if (m === 'next') next();
+      else if (m === 'add') add();
+      else if (m === 'import') importAll();
+    };
+    if (url) check();
+    else askUrl();
+  });
+}
+
+// toybox://add links are shown one at a time.
+let linkQueue = Promise.resolve();
+async function takePendingLinks() {
+  const reqs = await invoke('take_pending_links');
+  for (const r of reqs) linkQueue = linkQueue.then(() => addCatalogFlow({ url: r.url, name: r.name, fromLink: true }));
+}
 
 function lightbox(shots, index) {
   const ov = $('#overlay');
@@ -127,6 +261,8 @@ function render({ enter = false } = {}) {
   } else {
     main.scrollTop = scroll;
   }
+  // A game page takes on its catalog's accent colour (multi-catalog mode).
+  main.setAttribute('style', V.pageAccent());
   sidebarEl.innerHTML = V.sidebar();
   const gate = V.updateGate();
   gateEl.innerHTML = gate;
@@ -192,9 +328,15 @@ main.addEventListener('mouseout', (e) => {
 
 // ---------------------------------------------------------------- data loading
 
+/** The config's branding with a single catalog (or keepBranding); a neutral
+ *  theme once games come from several publishers. */
+function applyBranding() {
+  applyTheme(S.catalog && !S.catalog.branded ? {} : S.config?.theme);
+}
+
 async function loadConfig() {
   S.config = await invoke('get_config');
-  applyTheme(S.config.theme);
+  applyBranding();
   document.title = S.config.name;
   $('#brand-name').textContent = S.config.name;
   const logo = $('#brand-logo');
@@ -222,28 +364,32 @@ async function loadLibrary(initial = false) {
 // even when loads overlap. Reset when the catalog source changes.
 let listedIds = null;
 
-async function loadCatalog(refresh) {
+async function loadCatalog(refresh, sourceId = null) {
   const before = new Set(updatesAvailable());
   S.catalogLoading = true;
   if (!S.catalog) scheduleRender();
   try {
-    S.catalog = await invoke('get_catalog', { refresh });
+    S.catalog = await invoke('get_catalog', { refresh, source: sourceId });
     S.catalogError = null;
   } catch (e) {
     S.catalogError = String(e);
   } finally {
     S.catalogLoading = false;
   }
+  applyBranding();
   scheduleRender();
   // Tell the player when a game in their library is pulled from the catalog.
   if (S.catalog) {
     const listed = listedIds;
     const now = new Set(S.catalog.games.map((g) => g.id));
     listedIds = now;
-    for (const id of listed ? libraryIds().filter((id) => listed.has(id) && !now.has(id)) : []) {
+    // Only for catalogs that loaded fine: a catalog being turned off, removed
+    // or unreachable isn't a game being removed.
+    const healthy = (id) => { const s = source(entry(id)?.sourceId); return s?.enabled && s.loaded && !s.offline; };
+    for (const id of listed ? libraryIds().filter((id) => listed.has(id) && !now.has(id) && healthy(id)) : []) {
       const g = game(id);
       const builds = entry(id)?.installed || kept(id).length;
-      toast({ title: `${g.name} was removed from the catalog`, sub: builds && g.kind !== 'web' ? "You can keep playing what's installed." : "It's no longer available.", g, ms: 8000 });
+      toast({ title: `${g.name} was removed from ${multi() ? `“${sourceName(g.sourceId)}”` : 'the catalog'}`, sub: builds && g.kind !== 'web' ? "You can keep playing what's installed." : "It's no longer available.", g, ms: 8000 });
     }
   }
   // Announce new updates the user has to act on themselves.
@@ -297,7 +443,7 @@ const actions = {
     S.menuOpen = null;
     scheduleRender();
     const g = game(id);
-    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: `The game files${S.library.games[id]?.kept?.length ? ', including kept older versions,' : ''} will be deleted from this computer. ${g.orphan ? "This game is no longer in the catalog, so you won't be able to install it again." : 'It stays in your library so you can reinstall it any time.'}`, ok: 'Uninstall', danger: true }))) return;
+    if (!(await confirmModal({ title: `Uninstall ${g.name}?`, text: `The game files${S.library.games[id]?.kept?.length ? ', including kept older versions,' : ''} will be deleted from this computer. ${g.orphan ? "This game is no longer available from its catalog, so you won't be able to install it again." : g.uncatalogued ? "You can reinstall it once its catalog is available again." : 'It stays in your library so you can reinstall it any time.'}`, ok: 'Uninstall', danger: true }))) return;
     await call('uninstall_game', { id });
     toast({ title: 'Uninstalled', sub: g.name, g });
   },
@@ -360,7 +506,54 @@ const actions = {
   },
   async refresh() {
     await loadCatalog(true);
-    if (S.catalog && !S.catalog.offline) toast({ title: 'Catalog up to date', kind: 'ok', ms: 2500 });
+    const bad = sources().filter((s) => s.enabled && s.error);
+    if (!sources().some((s) => s.enabled)) return;
+    if (!bad.length) toast({ title: multi() ? 'Catalogs up to date' : 'Catalog up to date', kind: 'ok', ms: 2500 });
+    else toast({ title: bad.length === 1 ? `Couldn't check ${bad[0].name}` : `Couldn't check ${bad.length} catalogs`, sub: bad.map((s) => s.error).join('\n'), kind: 'err', ms: 8000 });
+  },
+  'add-catalog'() {
+    S.menuOpen = null;
+    addCatalogFlow();
+  },
+  'import-catalogs'() {
+    S.menuOpen = null;
+    render();
+    addCatalogFlow({ importing: true });
+  },
+  async 'export-catalogs'() {
+    S.menuOpen = null;
+    render();
+    const path = await call('export_sources');
+    toast({ title: 'Catalog list exported', sub: path, kind: 'ok', ms: 7000 });
+  },
+  async 'source-toggle'({ sid }) {
+    const s = source(sid);
+    if (!s) return;
+    s.enabled = !s.enabled;
+    render();
+    await call('set_source_enabled', { id: sid, enabled: s.enabled }).catch(() => {});
+    await loadCatalog(false);
+  },
+  async 'source-refresh'({ sid }) {
+    await loadCatalog(true, sid);
+    const s = source(sid);
+    if (!s) return;
+    if (s.error) toast({ title: `Couldn't check ${s.name}`, sub: s.error, kind: 'err', ms: 8000 });
+    else toast({ title: `${s.name} is up to date`, kind: 'ok', ms: 2500 });
+  },
+  async 'source-remove'({ sid }) {
+    const s = source(sid);
+    if (!s) return;
+    const ids = libraryIds().filter((id) => entry(id)?.sourceId === sid);
+    const installed = ids.filter((id) => entry(id)?.installed).length;
+    const text = ids.length
+      ? (ids.length === 1
+        ? `1 game from it is in your library. It stays there${installed ? ' and keeps working' : ''}, but won't get updates. Adding the catalog again reconnects it.`
+        : `${ids.length} games from it are in your library. They stay there${installed ? ' (installed ones keep working)' : ''}, but won't get updates. Adding the catalog again reconnects them.`)
+      : 'Its games will no longer show up here. You can add it again later.';
+    if (!(await confirmModal({ title: `Remove “${s.name}”?`, text, ok: 'Remove', danger: true }))) return;
+    await call('remove_source', { id: sid });
+    toast({ title: `Removed ${s.name}`, kind: 'ok', ms: 3000 });
   },
   'refresh-news'() {
     loadNews();
@@ -430,6 +623,10 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', (e) => {
   if (e.target.dataset.change === 'lib-sort') {
     S.libSort = e.target.value;
+    render();
+  }
+  if (e.target.dataset.change === 'lib-source') {
+    S.libSource = e.target.value;
     render();
   }
   if (e.target.dataset.change === 'keep-limit') {
@@ -544,6 +741,10 @@ listen('game://state', ({ payload }) => {
 
 listen('catalog://changed', () => loadCatalog(false));
 
+// A toybox://add link was opened (the launcher was started by it, or it was
+// already running).
+listen('sources://add-request', () => takePendingLinks());
+
 listen('launcher://update', ({ payload: u }) => {
   const prev = S.launcherUpdate;
   S.launcherUpdate = u;
@@ -591,6 +792,7 @@ async function boot() {
   onRoute();
   await loadCatalog(true);
   loadNews();
+  takePendingLinks();
 }
 
 boot().catch((e) => {

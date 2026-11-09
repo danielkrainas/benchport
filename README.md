@@ -8,6 +8,11 @@ lets them add games to their library, installs them with one click, verifies
 every download (sha256), and keeps them updated automatically whenever you bump
 a version number. An optional RSS feed powers the News tab.
 
+Out of the box it's **Toybox**, a general launcher that players fill with catalogs from
+several publishers: one `toybox://add?url=…` link per catalog, all in a single library
+(see [Multiple catalogs](#multiple-catalogs)). Studios can also fork it into **a branded
+launcher** with their own catalog built in (see [Making it yours](#making-it-yours)).
+
 ![Toybox running the demo catalog: home page with a featured game, library sidebar and recently played](docs/screenshot.png)
 
 Built with Rust + [Tauri 2](https://tauri.app). The UI is plain HTML/CSS/JS
@@ -17,9 +22,13 @@ Built with Rust + [Tauri 2](https://tauri.app). The UI is plain HTML/CSS/JS
 
 ```bash
 npm install                      # installs the Tauri CLI
-python3 examples/make-demo.py    # generates a local demo catalog in examples/demo/
+python3 examples/make-demo.py    # generates two demo catalogs in examples/
 npm run dev                      # debug builds auto-load examples/launcher.json
 ```
+
+The demo config is a branded "Bench Studio" launcher with `examples/demo/` built in (and
+`allowAddingCatalogs` switched on). To try multi-catalog mode, add `examples/demo-arcade/catalog.json` ("Night Shift Arcade") in
+Settings → Catalogs.
 
 Linux needs the usual [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 (WebKitGTK 4.1 etc). `npm run build` produces installers in
@@ -27,6 +36,10 @@ Linux needs the usual [Tauri prerequisites](https://tauri.app/start/prerequisite
 .dmg/.app on macOS).
 
 ## Making it yours
+
+The default `src-tauri/launcher.json` is Toybox itself: no built-in catalog, adding
+catalogs allowed, self-updating from this repo's GitHub releases. To make a studio's
+branded launcher instead:
 
 1. Edit **`src-tauri/launcher.json`**. It's compiled into the binary:
 
@@ -45,10 +58,20 @@ Linux needs the usual [Tauri prerequisites](https://tauri.app/start/prerequisite
    The whole palette (surfaces, borders, text, light/dark) is derived from
    `primary` (background) and `accent` (buttons and highlights). A light `primary` gives a light theme.
 
+   | Field | Meaning |
+   |---|---|
+   | `catalogUrl` | The built-in catalog. Leave it empty for a general launcher that starts with no catalogs (like Toybox). |
+   | `allowAddingCatalogs` | Let players add other catalogs (Settings, `toybox://` links). Defaults to `true` without a `catalogUrl` and `false` with one, so a branded launcher sticks to its catalog and ignores `toybox://` links unless you opt in. |
+   | `keepBranding` | With `allowAddingCatalogs`, keep this `theme` even when several catalogs are added (by default the launcher switches to a neutral theme then). |
+   | `rssUrl`, `updateUrl` | News feed and [launcher self-update](#updating-the-launcher-itself). Optional. |
+
 2. In `src-tauri/tauri.conf.json`, change `productName` and `identifier`.
    The identifier decides where user data is stored, so give your fork its own.
-3. Replace the icons in `src-tauri/icons/` (`npx tauri icon your-logo.png` generates the full set).
-4. `npm run build` and send your players the installer.
+3. Unless you allow adding catalogs, delete `plugins.deep-link` from `tauri.conf.json`
+   so your installer doesn't claim `toybox://` links from players who also have Toybox.
+   (A single-catalog launcher ignores them anyway and never registers the scheme itself.)
+4. Replace the icons in `src-tauri/icons/` (`npx tauri icon your-logo.png` generates the full set).
+5. `npm run build` and send your players the installer.
 
 An existing build can be pointed somewhere else without recompiling. Config is
 looked up in this order:
@@ -69,6 +92,8 @@ plain paths (relative paths resolve against the config file).
 ```json
 {
   "version": "2026-11-08",
+  "name": "Bench Studio playtests",
+  "publisher": "Bench Studio",
   "games": [
     {
       "id": "jump-test",
@@ -84,7 +109,12 @@ plain paths (relative paths resolve against the config file).
 }
 ```
 
-Required: `id` (letters, digits, `-` `_` `.`), `name`, `version`, and a `downloadUrl` and
+The top-level `name`, `publisher`, `icon`, `description`, `website`, `supportUrl` and
+`accent` (a `#rrggbb` colour) are all optional. They describe the catalog itself: they're
+shown when a player adds it, in Settings → Catalogs, and next to its games once a launcher
+follows several catalogs. In that mode `accent` also tints the catalog's game pages.
+
+For each game, required: `id` (letters, digits, `-` `_` `.`; unique within the catalog), `name`, `version`, and a `downloadUrl` and
 `executable` (either at the top level or per platform). Browser games are the exception: they
 only need a `playUrl` (see below). Everything else is optional:
 
@@ -139,6 +169,59 @@ Notes:
   `executable` is the path inside that folder, such as `Bin/Game.exe`. On macOS it may
   name a `.app` bundle. Unix permissions and symlinks are preserved, and the
   executable is always marked executable.
+
+## Multiple catalogs
+
+A launcher can follow several catalogs ("sources") at once, from different publishers.
+All their games share one library, and nothing needs a server beyond static files.
+
+- **Single-catalog mode** is a launcher with one catalog, typically a branded build with
+  `catalogUrl` set. It uses the config's name, logo and theme. Unless its config sets
+  `allowAddingCatalogs: true`, players can't add catalogs and it ignores `toybox://`
+  links completely (it doesn't register the scheme, come to the front, or show a dialog).
+- **Multi-catalog mode** starts when a second catalog is added. Games are grouped by
+  catalog on the home page, cards and game pages show which catalog a game comes from, the
+  Library can be filtered by catalog, and the theme turns neutral (unless `keepBranding`
+  is set) while each catalog's `accent` colours its own game pages.
+
+**Adding a catalog** (when the launcher allows it). From Settings → Catalogs → *Add catalog* (a URL or a local path), or
+with a link:
+
+```
+toybox://add?url=https%3A%2F%2Fexample.com%2Fcatalog.json&name=Example%20Games
+```
+
+`url` is required and must be http(s) (URL-encode it); `name` is optional and used until
+the catalog provides its own. The launcher opens (or comes to the front), fetches the
+catalog, and asks the player to confirm, showing its publisher, description and game
+count, with a reminder to only add catalogs from people they trust. Nothing is added
+without that confirmation. Put the link on a web page or send it in a message. If the
+launcher isn't installed yet, the link does nothing, so link to the installer too.
+
+The `toybox` scheme is declared in `tauri.conf.json` (`plugins.deep-link`), which Tauri's
+bundler turns into installer registration: `x-scheme-handler/toybox` in the `.deb`/`.rpm`
+desktop entry (via `src-tauri/linux/toybox.desktop`, which adds the `%u` the default
+template lacks), and the URL scheme in the Windows installers and the macOS Info.plist.
+The portable Windows build and the AppImage also register it themselves at startup.
+Debug builds leave the system alone; set `TOYBOX_REGISTER_PROTOCOL=1` to register one.
+Only the Linux side has been tested so far. A fork can change the scheme in
+`tauri.conf.json` and `PROTOCOL` in `src-tauri/src/catalogs.rs`.
+
+**Managing catalogs.** Settings → Catalogs lists each one with its status, and lets the
+player turn it off (its games stay installed and playable, but get no updates), check it
+now, or remove it. The built-in catalog from `catalogUrl` can be turned off but not
+removed. Removing a catalog keeps its library games. Adding the same catalog again later
+reconnects them. *Export catalog list* (the ⋯ menu) writes `toybox-catalogs.json` to the
+Downloads folder; give that file (its path or a URL) to *Import a catalog list…* or *Add
+catalog* on another computer to add them all.
+
+**How it's stored.** `sources.json` in the app data folder holds the catalogs. Library
+entries are keyed `"<sourceId>:<gameId>"` and record both ids, so two publishers can use
+the same game id. Games install to `games/<sourceId>/<gameId>/`, and each catalog has its
+own offline cache in `cache/sources/`. Catalogs are re-checked with `ETag` /
+`Last-Modified`, so an unchanged catalog costs one small request. A library from before
+multi-catalog support is migrated on first start: its games move under the config's
+catalog (source id `default`).
 
 ## Publishing a new build
 
@@ -246,8 +329,8 @@ show the update with a link to `page`. Debug builds never replace themselves; se
 
 ## How it behaves
 
-- **Offline:** the last good catalog and news feed are cached. Installed
-  games stay playable, and a banner shows that the launcher is offline.
+- **Offline:** each catalog's last good copy is cached separately, as is the news
+  feed. Installed games stay playable, and a banner names any catalog that's offline.
 - **Safe installs:** the zip is downloaded and hashed, extracted to a staging folder
   (zip-slip protected), and then swapped in for the old version. A failed or
   cancelled update leaves the previous install untouched.
@@ -255,7 +338,7 @@ show the update with a link to `page`. Debug builds never replace themselves; se
   stored in `library.json` in the app data folder (Settings → Storage).
 - **Keeping old versions:** each game page has an **Installed versions** panel with a
   per-game *Keep previous versions* switch. When it's on, an update moves the old build to
-  `games/.versions/<id>/<version>/` instead of deleting it. The Play button then gets a ▾
+  `games/<sourceId>/.versions/<id>/<version>/` instead of deleting it. The Play button then gets a ▾
   menu to choose *Latest* or any kept build, and each kept build can be played, opened or
   deleted from the panel. *Keep up to* caps how many old builds are kept (default 3, or
   *All versions*); the oldest are deleted past the limit, but never one that's playing.
@@ -266,12 +349,16 @@ show the update with a link to `page`. Debug builds never replace themselves; se
   builds stay playable but get no updates and can't be reinstalled; removed browser games
   and never-installed games show *No longer available* with a *Remove from library*
   button. The launcher shows a notification when a library game disappears on a refresh.
+  Games from a catalog that's turned off or removed behave the same way, with a note
+  saying so.
 
 ## Project layout
 
 ```
 src-tauri/src/
   config.rs     launcher.json loading
+  sources.rs    the catalogs a launcher follows (sources.json), export/import
+  catalogs.rs   loading/refreshing every catalog, adding sources, toybox:// links
   catalog.rs    catalog model, per-platform build resolution
   location.rs   URL / local path handling, relative resolution
   installer.rs  download → verify → extract → swap, auto-updates
@@ -281,7 +368,7 @@ src-tauri/src/
   news.rs       RSS/Atom parsing
   lib.rs        Tauri commands + app setup
 ui/             index.html, styles.css, js/ (app, views, store, util, icons)
-examples/       demo config + generator for a local demo catalog
+examples/       demo config + generator for two local demo catalogs
 tools/          publish.py (games), publish-launcher.py (launcher releases)
 docs/           README screenshot
 .github/        release workflow (GitHub Actions)

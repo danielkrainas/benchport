@@ -4,3 +4,4 @@
 /examples/demo/
 *.zip.part
 .DS_Store
+/examples/demo-arcade/

@@ -656,13 +656,20 @@ pub fn apply_and_restart(app: &AppHandle) -> Result<()> {
         c
     } else {
         let mut c = std::process::Command::new(&target);
-        c.args(std::env::args_os().skip(1));
+        // Keep flags, but not a toybox:// link we were opened with (it was
+        // already handled).
+        let link = format!("{}:", crate::catalogs::PROTOCOL);
+        c.args(std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().to_ascii_lowercase().starts_with(&link)));
         c
     };
     // Variables the AppImage runtime set for *this* process.
     for v in ["APPDIR", "APPIMAGE", "ARGV0", "OWD"] {
         cmd.env_remove(v);
     }
+    // Let go of the single-instance lock first, or the new process would just
+    // hand its arguments to this one and quit.
+    #[cfg(desktop)]
+    tauri_plugin_single_instance::destroy(app);
     cmd.spawn().map_err(|e| Error::msg(format!("Updated, but couldn't restart the launcher: {e}")))?;
     app.exit(0);
     Ok(())

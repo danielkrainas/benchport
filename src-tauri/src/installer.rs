@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::catalog::{Game, ResolvedBuild};
 use crate::error::{Error, Result};
-use crate::library::{now, Installed};
+use crate::library::{game_key, now, split_key, Installed};
 use crate::location::Location;
 use crate::state::{state, Job};
 
@@ -35,6 +35,7 @@ pub enum Phase {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
+    /// The library key (`"<sourceId>:<gameId>"`).
     pub game_id: String,
     pub name: String,
     pub version: String,
@@ -100,21 +101,20 @@ impl Reporter {
     }
 }
 
-/// Validate and kick off an install/update in the background.
+/// Validate and kick off an install/update in the background. `id` is the
+/// library key.
 pub fn start(app: &AppHandle, id: &str) -> Result<()> {
     let st = state(app);
     if st.running.lock().unwrap().contains_key(id) {
         return Err(Error::msg("Close the game before updating it."));
     }
-    let (game, base) = st
-        .find_game(id)
-        .ok_or_else(|| Error::msg("This game is no longer in the catalog."))?;
+    let (game, base) = st.require_game(id)?;
     let build = game.resolve_build(Some(&base))?;
     let is_update = st.library.lock().unwrap().games.get(id).is_some_and(|e| e.installed.is_some());
 
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = Progress {
-        game_id: game.id.clone(),
+        game_id: id.to_string(),
         name: game.name.clone(),
         version: game.version.clone(),
         is_update,
@@ -137,7 +137,7 @@ pub fn start(app: &AppHandle, id: &str) -> Result<()> {
     })?;
     let _ = app.emit(EVENT, &progress);
 
-    let app = app.clone();
+    let (app, key) = (app.clone(), id.to_string());
     tauri::async_runtime::spawn(async move {
         let mut rep = Reporter {
             app: app.clone(),
@@ -146,7 +146,7 @@ pub fn start(app: &AppHandle, id: &str) -> Result<()> {
             window_start: Instant::now(),
             window_bytes: 0,
         };
-        let result = install(&app, &game, build, &cancel, &mut rep).await;
+        let result = install(&app, &key, &game, build, &cancel, &mut rep).await;
         match result {
             Ok(()) => rep.phase(Phase::Done, Some(100.0)),
             Err(_) if cancel.load(Ordering::Relaxed) => rep.phase(Phase::Cancelled, None),
@@ -155,13 +155,14 @@ pub fn start(app: &AppHandle, id: &str) -> Result<()> {
                 rep.phase(Phase::Error, None);
             }
         }
-        state(&app).jobs.lock().unwrap().remove(&game.id);
+        state(&app).jobs.lock().unwrap().remove(&key);
         let _ = app.emit("library://changed", ());
     });
     Ok(())
 }
 
-/// Start updates for every installed game whose catalog version differs.
+/// Start updates for every installed game whose catalog version differs
+/// (across all enabled catalogs).
 pub fn run_auto_updates(app: &AppHandle) {
     let st = state(app);
     if !st.library.lock().unwrap().settings.auto_update {
@@ -175,23 +176,22 @@ pub fn run_auto_updates(app: &AppHandle) {
 }
 
 fn pending_updates(st: &crate::state::AppState) -> Vec<String> {
-    let cat = st.catalog.read().unwrap();
-    let Some(cat) = cat.as_ref() else { return vec![] };
+    let cats = st.catalogs.read().unwrap();
     let lib = st.library.lock().unwrap();
     let running = st.running.lock().unwrap();
     let jobs = st.jobs.lock().unwrap();
-    cat.catalog
-        .games
-        .iter()
-        .filter(|g| g.is_available() && !g.is_web())
-        .filter(|g| {
+    cats.iter()
+        .filter_map(|(sid, cs)| Some((sid, cs.catalog.as_ref()?)))
+        .flat_map(|(sid, c)| c.games.iter().map(move |g| (game_key(sid, &g.id), g)))
+        .filter(|(_, g)| g.is_available() && !g.is_web())
+        .filter(|(key, g)| {
             lib.games
-                .get(&g.id)
+                .get(key)
                 .and_then(|e| e.installed.as_ref())
                 .is_some_and(|i| i.version != g.version)
         })
-        .filter(|g| !running.contains_key(&g.id) && !jobs.contains_key(&g.id))
-        .map(|g| g.id.clone())
+        .filter(|(key, _)| !running.contains_key(key) && !jobs.contains_key(key))
+        .map(|(key, _)| key)
         .collect()
 }
 
@@ -201,13 +201,15 @@ pub fn cancel(app: &AppHandle, id: &str) {
     }
 }
 
-async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Arc<AtomicBool>, rep: &mut Reporter) -> Result<()> {
+async fn install(app: &AppHandle, key: &str, game: &Game, build: ResolvedBuild, cancel: &Arc<AtomicBool>, rep: &mut Reporter) -> Result<()> {
     let st = state(app);
-    let (downloads, games_dir) = (st.paths.downloads.clone(), st.paths.games.clone());
+    let source_id = split_key(key).map(|(s, _)| s).ok_or_else(|| Error::msg("invalid game key"))?;
+    // Each catalog's games live in their own folder, so ids can't collide.
+    let (downloads, games_dir) = (st.paths.downloads.clone(), st.paths.source_games(source_id));
     tokio::fs::create_dir_all(&downloads).await?;
     tokio::fs::create_dir_all(&games_dir).await?;
 
-    let zip_path = downloads.join(format!("{}-{}.zip.part", game.id, sanitize(&game.version)));
+    let zip_path = downloads.join(format!("{source_id}-{}-{}.zip.part", game.id, sanitize(&game.version)));
     let staging = games_dir.join(format!(".staging-{}", game.id));
 
     let res = async {
@@ -250,13 +252,16 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
 
         // 4. Swap into place, keeping the old build if the player asked to.
         rep.phase(Phase::Finalizing, None);
-        let previous = {
+        let (previous, old_path) = {
             let lib = st.library.lock().unwrap();
-            lib.games
-                .get(&game.id)
+            let installed = lib.games.get(key).and_then(|e| e.installed.clone());
+            let previous = lib
+                .games
+                .get(key)
                 .filter(|e| e.keep_versions)
-                .and_then(|e| e.installed.clone())
-                .filter(|p| p.version != game.version && p.path == games_dir.join(&game.id))
+                .and(installed.clone())
+                .filter(|p| p.version != game.version && p.path == games_dir.join(&game.id));
+            (previous, installed.map(|i| i.path))
         };
         let keep_as = previous.as_ref().map(|p| versions_dir(&games_dir, &game.id).join(sanitize(&p.version)));
         let exe = build.executable.clone();
@@ -268,7 +273,7 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
         // 5. Record.
         let mut pruned = Vec::new();
         st.update_library(app, |lib| {
-            let e = lib.entry(&game.id);
+            let e = lib.entry(key);
             e.name = Some(game.name.clone());
             if let (true, Some(prev), Some(dest)) = (kept, previous.clone(), keep_as.clone()) {
                 e.kept.retain(|k| k.version != prev.version);
@@ -287,7 +292,7 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
             });
             e.installed = Some(Installed {
                 version: game.version.clone(),
-                path: final_dir,
+                path: final_dir.clone(),
                 executable: build.executable.clone(),
                 args: build.args.clone(),
                 installed_at: now(),
@@ -295,8 +300,13 @@ async fn install(app: &AppHandle, game: &Game, build: ResolvedBuild, cancel: &Ar
             });
             pruned = e.prune_kept(None);
         })?;
-        remove_builds(&games_dir, &pruned);
-        crate::snapshot_library(app);
+        remove_builds(&st.paths.games, &pruned);
+        // An install left somewhere else (e.g. a pre-multi-catalog folder that
+        // couldn't be moved) is now superseded.
+        if let Some(old) = old_path.filter(|p| *p != final_dir && p.starts_with(&st.paths.games) && p.exists()) {
+            let _ = std::fs::remove_dir_all(old);
+        }
+        crate::catalogs::snapshot_library(app);
         Ok(())
     }
     .await;
@@ -435,10 +445,17 @@ pub fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progres
     Ok(())
 }
 
-/// Where builds kept by "keep previous versions" live. Game ids can't start
-/// with a dot, so this never collides with a game folder.
+/// Where builds kept by "keep previous versions" live, inside a catalog's
+/// games folder. Game ids can't start with a dot, so this never collides with
+/// a game folder.
 pub fn versions_dir(games_dir: &Path, id: &str) -> PathBuf {
     games_dir.join(".versions").join(id)
+}
+
+/// [`versions_dir`] for a library key.
+fn versions_dir_for(st: &crate::state::AppState, key: &str) -> Option<PathBuf> {
+    let (source_id, game_id) = split_key(key)?;
+    Some(versions_dir(&st.paths.source_games(source_id), game_id))
 }
 
 /// Locate the game root inside the staging dir, move it into
@@ -531,8 +548,7 @@ pub fn uninstall(app: &AppHandle, id: &str) -> Result<()> {
         }
     }
     // Kept older versions go too.
-    let versions = versions_dir(&st.paths.games, id);
-    if versions.exists() {
+    if let Some(versions) = versions_dir_for(&st, id).filter(|v| v.exists()) {
         std::fs::remove_dir_all(&versions)?;
     }
     st.update_library(app, |lib| {
@@ -582,8 +598,9 @@ pub fn delete_all_versions(app: &AppHandle, id: &str) -> Result<()> {
         }
     })?;
     remove_builds(&st.paths.games, &removed);
-    let versions = versions_dir(&st.paths.games, id);
-    let _ = std::fs::remove_dir(&versions); // only if empty
+    if let Some(versions) = versions_dir_for(&st, id) {
+        let _ = std::fs::remove_dir(&versions); // only if empty
+    }
     Ok(())
 }
 

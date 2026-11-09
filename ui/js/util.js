@@ -107,3 +107,16 @@ export function applyTheme(theme = {}) {
   root.dataset.scheme = light ? 'light' : 'dark';
   root.style.colorScheme = light ? 'light' : 'dark';
 }
+
+/** CSS custom properties that swap in another accent colour (a catalog's)
+ *  for one part of the page. Returns '' for an invalid colour. */
+export function accentVars(hex) {
+  const a = parseHex(hex);
+  if (!a) return '';
+  return [
+    `--accent:${rgb(a)}`,
+    `--accent-hover:${rgb(mix(a, [255, 255, 255], 0.14))}`,
+    `--accent-rgb:${a.join(' ')}`,
+    `--accent-text:${lum(a) > 0.5 ? '#0d0f12' : '#ffffff'}`,
+  ].join(';');
+}

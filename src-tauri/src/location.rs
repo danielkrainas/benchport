@@ -19,6 +19,10 @@ pub enum Location {
 
 impl Location {
     /// Parse `s`, resolving relative references against `base`.
+    ///
+    /// A catalog on the web may only point at web addresses: an absolute path
+    /// or `file://` URL in it is rejected, so a third-party catalog can't make
+    /// the launcher read (or show) files from the player's disk.
     pub fn parse(s: &str, base: Option<&Location>) -> Result<Location> {
         let s = s.trim();
         if s.is_empty() {
@@ -27,6 +31,12 @@ impl Location {
         let lower = s.to_ascii_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
             return Ok(Location::Remote(Url::parse(s)?));
+        }
+        if let Some(Location::Remote(u)) = base {
+            if lower.starts_with("file:") || Path::new(s).is_absolute() || Url::parse(s).is_ok() {
+                return Err(Error::msg(format!("\"{s}\" isn't a web address (a catalog on the web can't refer to local files)")));
+            }
+            return Ok(Location::Remote(u.join(s)?));
         }
         if lower.starts_with("file://") {
             let url = Url::parse(s)?;
@@ -40,7 +50,7 @@ impl Location {
             return Ok(Location::Local(path.to_path_buf()));
         }
         match base {
-            Some(Location::Remote(u)) => Ok(Location::Remote(u.join(s)?)),
+            Some(Location::Remote(_)) => unreachable!("handled above"),
             Some(Location::Local(p)) => {
                 let dir = if p.is_dir() { p.as_path() } else { p.parent().unwrap_or(Path::new(".")) };
                 Ok(Location::Local(dir.join(s)))
@@ -56,6 +66,32 @@ impl Location {
         }
     }
 
+    /// Fetch, skipping the body when the server says the copy we have (per
+    /// its `ETag` / `Last-Modified`) is still current. Local files are
+    /// always read.
+    pub async fn fetch_if_changed(&self, client: &reqwest::Client, etag: Option<&str>, last_modified: Option<&str>) -> Result<Fetched> {
+        match self {
+            Location::Remote(u) => {
+                let mut req = client.get(u.clone());
+                if let Some(e) = etag {
+                    req = req.header(reqwest::header::IF_NONE_MATCH, e);
+                }
+                if let Some(m) = last_modified {
+                    req = req.header(reqwest::header::IF_MODIFIED_SINCE, m);
+                }
+                let resp = req.send().await?;
+                if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+                    return Ok(Fetched::NotModified);
+                }
+                let resp = resp.error_for_status()?;
+                let header = |h| resp.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_string);
+                let (etag, last_modified) = (header(reqwest::header::ETAG), header(reqwest::header::LAST_MODIFIED));
+                Ok(Fetched::Body { bytes: resp.bytes().await?.to_vec(), etag, last_modified })
+            }
+            Location::Local(_) => Ok(Fetched::Body { bytes: self.fetch(client).await?, etag: None, last_modified: None }),
+        }
+    }
+
     pub async fn fetch(&self, client: &reqwest::Client) -> Result<Vec<u8>> {
         match self {
             Location::Remote(u) => {
@@ -67,6 +103,11 @@ impl Location {
                 .map_err(|e| Error::msg(format!("could not read {}: {e}", p.display()))),
         }
     }
+}
+
+pub enum Fetched {
+    NotModified,
+    Body { bytes: Vec<u8>, etag: Option<String>, last_modified: Option<String> },
 }
 
 /// Turn an image reference into something the webview can display:
@@ -121,6 +162,19 @@ mod tests {
         match Location::parse("builds/a.zip", Some(&base)).unwrap() {
             Location::Local(p) => assert_eq!(p, PathBuf::from("/srv/demo/builds/a.zip")),
             _ => panic!("expected local"),
+        }
+    }
+
+    #[test]
+    fn web_catalogs_cant_reach_local_files() {
+        let base = Location::parse("https://cdn.example.com/catalog.json", None).unwrap();
+        for evil in ["/etc/passwd", "file:///etc/passwd", "C:\\Windows\\win.ini", "data:text/html,hi", "javascript:alert(1)"] {
+            assert!(Location::parse(evil, Some(&base)).is_err(), "{evil} should be rejected");
+        }
+        // Relative paths (even with ..) stay on the web.
+        match Location::parse("../builds/a.zip", Some(&base)).unwrap() {
+            Location::Remote(u) => assert_eq!(u.as_str(), "https://cdn.example.com/builds/a.zip"),
+            _ => panic!("expected remote"),
         }
     }
 

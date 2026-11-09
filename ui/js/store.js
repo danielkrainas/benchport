@@ -2,7 +2,9 @@
 
 export const S = {
   config: null,
-  catalog: null, // { version, games[], source, fetchedAt, offline, error }
+  // { games[], sources[], removedSources[], branded, multi } — games from every
+  // enabled catalog; a game's `id` is its library key "<sourceId>:<gameId>".
+  catalog: null,
   catalogLoading: true,
   catalogError: null,
   library: { games: {}, settings: { autoUpdate: true } },
@@ -16,6 +18,7 @@ export const S = {
   spot: 0,
   libFilter: 'all',
   libSort: 'name',
+  libSource: 'all',
   menuOpen: null,
   launcherUpdate: null, // selfupdate::Status from the backend
 };
@@ -30,23 +33,56 @@ export function entry(id) {
   return S.library.games[id] || null;
 }
 
+// ---- catalogs (sources)
+
+export const sources = () => S.catalog?.sources || [];
+export const source = (sid) => sources().find((s) => s.id === sid) || null;
+/** The catalog a game (or library key) comes from. */
+export const sourceOf = (id) => source(id?.sourceId || entry(id)?.sourceId || String(id).split(':')[0]);
+/** Name of a catalog, including ones the player removed. */
+export function sourceName(sid) {
+  return source(sid)?.name || S.catalog?.removedSources?.find((r) => r.id === sid)?.name || 'an unknown catalog';
+}
+/** More than one catalog: show where games come from. */
+export const multi = () => !!S.catalog?.multi;
+
+/**
+ * Why a library game isn't in the loaded catalogs:
+ *   removed        — its catalog loaded, but no longer lists it
+ *   sourceRemoved  — the player removed its catalog
+ *   sourceDisabled — its catalog is turned off
+ *   unknown        — its catalog couldn't be loaded, so we can't tell
+ */
+function missingReason(e) {
+  if (!S.catalog) return 'unknown';
+  const src = source(e.sourceId);
+  if (!src) return 'sourceRemoved';
+  if (!src.enabled) return 'sourceDisabled';
+  if (!src.loaded) return 'unknown';
+  return 'removed';
+}
+
 /** A game as the UI sees it: catalog data, or — for a library game that's
- *  not in the catalog — the snapshot the library kept of its last entry.
- *  `uncatalogued`: not in the catalog we have. `orphan`: removed from a
- *  catalog that did load (without any catalog we can't tell). */
+ *  not in the catalogs — the snapshot the library kept of its last entry.
+ *  `uncatalogued`: not in the loaded catalogs (`missing` says why).
+ *  `orphan`: gone for good — removed from its catalog, or its catalog was
+ *  removed — so it can't be installed again. */
 export function game(id) {
   const g = catalogGame(id);
   if (g) return g;
   const e = entry(id);
   if (!e) return null;
   const snap = e.snapshot || {};
+  const missing = missingReason(e);
   return {
     description: '',
     screenshots: [],
     tags: [],
     ...snap,
     id,
-    name: snap.name || e.name || id,
+    sourceId: e.sourceId,
+    gameId: e.gameId,
+    name: snap.name || e.name || e.gameId || id,
     // Only what's on this computer is meaningful now.
     version: e.installed?.version || '',
     releaseNotes: null,
@@ -55,7 +91,8 @@ export function game(id) {
     featured: false,
     available: false,
     uncatalogued: true,
-    orphan: !!S.catalog,
+    missing,
+    orphan: missing === 'removed' || missing === 'sourceRemoved',
   };
 }
 

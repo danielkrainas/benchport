@@ -1,4 +1,5 @@
 mod catalog;
+mod catalogs;
 mod config;
 mod error;
 mod installer;
@@ -7,6 +8,7 @@ mod location;
 mod news;
 mod runner;
 mod selfupdate;
+mod sources;
 mod state;
 
 use std::collections::HashMap;
@@ -17,13 +19,14 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use catalog::GameView;
+use catalogs::{AddRequest, CatalogView, Preview};
 use error::{Error, Result};
 use installer::Progress;
-use library::{now, write_atomic, Library, Settings};
+use library::{write_atomic, Library, Settings};
 use location::{resolve_image, Location};
 use news::NewsItem;
-use state::{state, AppState, CatalogState, Paths};
+use sources::{ExportedSource, SourceList};
+use state::{state, AppState, Paths};
 
 /// How often the catalog is re-checked in the background.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -36,7 +39,11 @@ struct ConfigView {
     name: String,
     tagline: Option<String>,
     logo: Option<String>,
-    catalog_url: String,
+    catalog_url: Option<String>,
+    allow_adding_catalogs: bool,
+    keep_branding: bool,
+    /// The `toybox://` scheme, for showing example links.
+    protocol: &'static str,
     rss_url: Option<String>,
     update_url: Option<String>,
     theme: config::Theme,
@@ -47,17 +54,6 @@ struct ConfigView {
     app_version: String,
     data_dir: String,
     games_dir: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CatalogView {
-    version: String,
-    games: Vec<GameView>,
-    source: String,
-    fetched_at: u64,
-    offline: bool,
-    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -75,134 +71,12 @@ struct RunningView {
     version: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Pre-multi-catalog cache metadata (cache/catalog.meta.json).
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CacheMeta {
+struct LegacyCacheMeta {
     source: String,
     fetched_at: u64,
-}
-
-// ---------------------------------------------------------------- catalog
-
-fn catalog_view(st: &AppState) -> Option<CatalogView> {
-    let guard = st.catalog.read().unwrap();
-    let c = guard.as_ref()?;
-    Some(CatalogView {
-        version: c.catalog.version.clone(),
-        games: c.catalog.games.iter().map(|g| GameView::from_game(g, Some(&c.location))).collect(),
-        source: c.location.display(),
-        fetched_at: c.fetched_at,
-        offline: c.offline,
-        error: c.error.clone(),
-    })
-}
-
-/// Remember how each library game looked in the catalog, so it can still be
-/// shown properly if it's later removed. Only writes when something changed.
-/// Local catalog images arrive inlined as data: URLs. Keep small icons and
-/// banners, but don't let screenshots bloat library.json.
-fn slim_snapshot(mut v: serde_json::Value) -> serde_json::Value {
-    const MAX_INLINE: usize = 256 * 1024;
-    let is_data = |x: &serde_json::Value| x.as_str().is_some_and(|s| s.starts_with("data:"));
-    if let Some(o) = v.as_object_mut() {
-        for key in ["icon", "banner"] {
-            if o.get(key).is_some_and(|x| is_data(x) && x.as_str().unwrap().len() > MAX_INLINE) {
-                o.remove(key);
-            }
-        }
-        if let Some(serde_json::Value::Array(shots)) = o.get_mut("screenshots") {
-            shots.retain(|x| !is_data(x));
-        }
-    }
-    v
-}
-
-pub(crate) fn snapshot_library(app: &AppHandle) {
-    let st = state(app);
-    let views: Vec<(String, String, serde_json::Value)> = {
-        let guard = st.catalog.read().unwrap();
-        let Some(c) = guard.as_ref() else { return };
-        let lib = st.library.lock().unwrap();
-        c.catalog
-            .games
-            .iter()
-            .filter(|g| lib.games.contains_key(&g.id))
-            .filter_map(|g| {
-                let v = slim_snapshot(serde_json::to_value(GameView::from_game(g, Some(&c.location))).ok()?);
-                let e = &lib.games[&g.id];
-                (e.snapshot.as_ref() != Some(&v) || e.name.as_deref() != Some(&g.name)).then(|| (g.id.clone(), g.name.clone(), v))
-            })
-            .collect()
-    };
-    if views.is_empty() {
-        return;
-    }
-    let _ = st.update_library(app, |lib| {
-        for (id, name, v) in views {
-            if let Some(e) = lib.games.get_mut(&id) {
-                e.name = Some(name);
-                e.snapshot = Some(v);
-            }
-        }
-    });
-}
-
-async fn load_catalog(app: &AppHandle) -> Result<()> {
-    let st = state(app);
-    let _guard = st.refresh_lock.lock().await;
-    let location = st.config.read().unwrap().catalog_location()?;
-    let source = location.display();
-    let cache_file = st.paths.cache.join("catalog.json");
-    let meta_file = st.paths.cache.join("catalog.meta.json");
-
-    let fetched = async {
-        let bytes = location.fetch(&st.client).await?;
-        let catalog = catalog::parse(&bytes)?;
-        Ok::<_, Error>((bytes, catalog))
-    }
-    .await;
-
-    let new_state = match fetched {
-        Ok((bytes, catalog)) => {
-            let fetched_at = now();
-            let _ = write_atomic(&cache_file, &bytes);
-            let _ = write_atomic(&meta_file, &serde_json::to_vec(&CacheMeta { source: source.clone(), fetched_at })?);
-            CatalogState { catalog, location, fetched_at, offline: false, error: None }
-        }
-        Err(err) => {
-            // Fall back to the last good copy so the launcher works offline.
-            let cached = std::fs::read(&meta_file)
-                .ok()
-                .and_then(|m| serde_json::from_slice::<CacheMeta>(&m).ok())
-                .filter(|m| m.source == source)
-                .and_then(|m| Some((m, catalog::parse(&std::fs::read(&cache_file).ok()?).ok()?)));
-            match cached {
-                Some((meta, catalog)) => CatalogState {
-                    catalog,
-                    location,
-                    fetched_at: meta.fetched_at,
-                    offline: true,
-                    error: Some(err.to_string()),
-                },
-                None => {
-                    // Keep whatever we already had in memory, flagged as stale.
-                    let mut guard = st.catalog.write().unwrap();
-                    if let Some(c) = guard.as_mut() {
-                        c.offline = true;
-                        c.error = Some(err.to_string());
-                        return Ok(());
-                    }
-                    return Err(Error::msg(format!("Couldn't load the game catalog from {source}: {err}")));
-                }
-            }
-        }
-    };
-    *st.catalog.write().unwrap() = Some(new_state);
-    drop(_guard);
-    snapshot_library(app);
-    installer::run_auto_updates(app);
-    let _ = app.emit("catalog://changed", ());
-    Ok(())
 }
 
 // ---------------------------------------------------------------- commands
@@ -215,7 +89,10 @@ fn get_config(app: AppHandle) -> ConfigView {
         name: cfg.config.name.clone(),
         tagline: cfg.config.tagline.clone(),
         logo: resolve_image(&cfg.config.logo, cfg.base.as_ref()),
-        catalog_url: cfg.catalog_location().map(|l| l.display()).unwrap_or(cfg.config.catalog_url.clone()),
+        catalog_url: cfg.catalog_location().map(|l| l.map(|l| l.display()).unwrap_or(cfg.config.catalog_url.clone())),
+        allow_adding_catalogs: cfg.config.allows_adding(),
+        keep_branding: cfg.config.keep_branding,
+        protocol: catalogs::PROTOCOL,
         rss_url: cfg.rss_location().and_then(|r| r.ok()).map(|l| l.display()),
         update_url: cfg.update_location().and_then(|r| r.ok()).map(|l| l.display()),
         theme: cfg.config.theme.clone(),
@@ -229,13 +106,53 @@ fn get_config(app: AppHandle) -> ConfigView {
     }
 }
 
+/// Games from every enabled catalog, plus the catalogs themselves.
+/// `refresh` re-checks them all (`source` limits that to one).
 #[tauri::command]
-async fn get_catalog(app: AppHandle, refresh: bool) -> Result<CatalogView> {
-    let needs_load = refresh || state(&app).catalog.read().unwrap().is_none();
-    if needs_load {
-        load_catalog(&app).await?;
+async fn get_catalog(app: AppHandle, refresh: bool, source: Option<String>) -> CatalogView {
+    let loaded = state(&app).catalogs_loaded.load(std::sync::atomic::Ordering::Relaxed);
+    if refresh || !loaded {
+        catalogs::refresh(&app, if loaded { source.as_deref() } else { None }).await;
     }
-    catalog_view(&state(&app)).ok_or_else(|| Error::msg("Catalog not loaded"))
+    catalogs::catalog_view(&state(&app))
+}
+
+// ---------------------------------------------------------------- sources
+
+#[tauri::command]
+async fn preview_source(app: AppHandle, url: String, from_link: bool) -> Result<Preview> {
+    catalogs::preview(&app, &url, from_link).await
+}
+
+#[tauri::command]
+async fn add_source(app: AppHandle, url: String, name: Option<String>) -> Result<String> {
+    catalogs::add(&app, &url, name).await
+}
+
+#[tauri::command]
+async fn import_sources(app: AppHandle, entries: Vec<ExportedSource>) -> Result<usize> {
+    catalogs::import(&app, entries).await
+}
+
+#[tauri::command]
+fn remove_source(app: AppHandle, id: String) -> Result<()> {
+    catalogs::remove(&app, &id)
+}
+
+#[tauri::command]
+async fn set_source_enabled(app: AppHandle, id: String, enabled: bool) -> Result<()> {
+    catalogs::set_enabled(&app, &id, enabled).await
+}
+
+#[tauri::command]
+fn export_sources(app: AppHandle) -> Result<String> {
+    catalogs::export(&app)
+}
+
+/// `toybox://add` links received so far (and not yet shown).
+#[tauri::command]
+fn take_pending_links(app: AppHandle) -> Vec<AddRequest> {
+    std::mem::take(&mut *state(&app).pending_links.lock().unwrap())
 }
 
 #[tauri::command]
@@ -273,13 +190,11 @@ fn get_library(app: AppHandle) -> LibraryView {
 #[tauri::command]
 fn add_to_library(app: AppHandle, id: String) -> Result<()> {
     let st = state(&app);
-    if st.find_game(&id).is_none() {
-        return Err(Error::msg("This game is no longer in the catalog."));
-    }
+    st.require_game(&id)?;
     st.update_library(&app, |lib| {
         lib.entry(&id);
     })?;
-    snapshot_library(&app);
+    catalogs::snapshot_library(&app);
     Ok(())
 }
 
@@ -430,8 +345,14 @@ fn open_url(app: AppHandle, url: String) -> Result<()> {
 #[tauri::command]
 async fn reload_config(app: AppHandle) -> Result<()> {
     let loaded = config::load(&app);
-    *state(&app).config.write().unwrap() = loaded;
-    *state(&app).catalog.write().unwrap() = None;
+    let st = state(&app);
+    {
+        let mut list = st.sources.lock().unwrap();
+        sync_config_source(&st.paths, &mut list, &loaded);
+    }
+    *st.config.write().unwrap() = loaded;
+    st.catalogs.write().unwrap().clear();
+    st.catalogs_loaded.store(false, std::sync::atomic::Ordering::Relaxed);
     selfupdate::reset(&app);
     spawn_launcher_check(&app);
     let _ = app.emit("config://changed", ());
@@ -440,6 +361,59 @@ async fn reload_config(app: AppHandle) -> Result<()> {
 
 // ---------------------------------------------------------------- setup
 
+/// Point the pinned source at launcher.json's catalog (adding it on first
+/// run), dropping its cache if the URL changed. Saves the list if needed.
+fn sync_config_source(paths: &Paths, list: &mut SourceList, cfg: &config::LoadedConfig) {
+    let url = match cfg.catalog_location() {
+        Some(Ok(l)) => Some(l.display()),
+        Some(Err(e)) => {
+            eprintln!("invalid catalogUrl in {}: {e}", cfg.source);
+            None
+        }
+        None => None,
+    };
+    let (changed, stale) = list.sync_config(url.as_deref());
+    if let Some(id) = stale {
+        let _ = std::fs::remove_file(paths.source_cache(&id));
+    }
+    if changed {
+        if let Err(e) = list.save(&paths.sources_file) {
+            eprintln!("couldn't save sources.json: {e}");
+        }
+    }
+}
+
+/// One-time upgrade from the single-catalog layout: re-key the library under
+/// the config's source and reuse the old catalog cache.
+fn migrate_single_catalog(paths: &Paths, list: &mut SourceList, library: &mut Library) {
+    let legacy_cache = paths.cache.join("catalog.json");
+    let legacy_meta = paths.cache.join("catalog.meta.json");
+    if let Some(src) = list.config_source().cloned() {
+        let meta = std::fs::read(&legacy_meta).ok().and_then(|m| serde_json::from_slice::<LegacyCacheMeta>(&m).ok());
+        if let Some(meta) = meta.filter(|m| sources::normalize(&m.source).ok() == sources::normalize(&src.url).ok()) {
+            let dest = paths.source_cache(&src.id);
+            if !dest.exists() {
+                let _ = std::fs::create_dir_all(dest.parent().unwrap());
+                if std::fs::rename(&legacy_cache, &dest).is_ok() {
+                    list.get_mut(&src.id).unwrap().fetched_at = Some(meta.fetched_at);
+                    let _ = list.save(&paths.sources_file);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&legacy_cache);
+    let _ = std::fs::remove_file(&legacy_meta);
+
+    // Without a configured catalog, old games can't be matched to a source;
+    // they're kept (and stay playable) under a placeholder id.
+    let source_id = list.config_source().map(|s| s.id.clone()).unwrap_or_else(|| "legacy".into());
+    if library.migrate(&source_id, &paths.games) {
+        if let Err(e) = library.save(&paths.library_file) {
+            eprintln!("couldn't save the migrated library: {e}");
+        }
+    }
+}
+
 fn init_state(app: &AppHandle) -> Result<AppState> {
     let data = app.path().app_data_dir()?;
     let paths = Paths {
@@ -447,14 +421,20 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
         downloads: data.join("downloads"),
         cache: data.join("cache"),
         library_file: data.join("library.json"),
+        sources_file: data.join("sources.json"),
         data,
     };
     for d in [&paths.data, &paths.games, &paths.downloads, &paths.cache] {
         std::fs::create_dir_all(d)?;
     }
-    // Clean up leftovers from interrupted installs.
+    // Clean up leftovers from interrupted installs (in games/ and in each
+    // catalog's folder).
+    let mut dirs = vec![paths.games.clone()];
     if let Ok(rd) = std::fs::read_dir(&paths.games) {
-        for e in rd.flatten() {
+        dirs.extend(rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.path()));
+    }
+    for dir in dirs {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().to_string();
             if n.starts_with(".staging-") || n.starts_with(".old-") {
                 let _ = std::fs::remove_dir_all(e.path());
@@ -478,12 +458,20 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
     // A previously downloaded update is re-fetched if still relevant.
     let _ = std::fs::remove_dir_all(paths.data.join("launcher-update"));
 
+    let mut sources = SourceList::load(&paths.sources_file);
+    sync_config_source(&paths, &mut sources, &config);
+    let mut library = Library::load(&paths.library_file);
+    migrate_single_catalog(&paths, &mut sources, &mut library);
+
     Ok(AppState {
         config: RwLock::new(config),
         client,
-        library: Mutex::new(Library::load(&paths.library_file)),
+        library: Mutex::new(library),
+        sources: Mutex::new(sources),
+        catalogs: RwLock::new(HashMap::new()),
+        catalogs_loaded: Default::default(),
+        pending_links: Mutex::new(Vec::new()),
         paths,
-        catalog: RwLock::new(None),
         jobs: Mutex::new(HashMap::new()),
         running: Mutex::new(HashMap::new()),
         refresh_lock: tokio::sync::Mutex::new(()),
@@ -492,9 +480,45 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
     })
 }
 
+/// Register the `toybox://` scheme where the installer doesn't: the portable
+/// Windows build (installers register it too, harmlessly) and AppImages.
+/// .deb/.rpm and macOS bundles declare it at build time. Debug builds don't
+/// touch the system unless TOYBOX_REGISTER_PROTOCOL=1.
+#[cfg(any(windows, target_os = "linux"))]
+fn register_protocol(app: &AppHandle) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+    let wanted = if cfg!(debug_assertions) {
+        std::env::var("TOYBOX_REGISTER_PROTOCOL").as_deref() == Ok("1")
+    } else {
+        cfg!(windows) || app.env().appimage.is_some()
+    };
+    if wanted {
+        if let Err(e) = app.deep_link().register_all() {
+            eprintln!("couldn't register the {}:// link handler: {e}", catalogs::PROTOCOL);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Must be the first plugin: a second launch (e.g. clicking a toybox://
+    // link while the launcher is open) hands its arguments to this instance,
+    // which the deep-link feature turns into an open-url event.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        // A branded single-catalog launcher doesn't answer toybox:// links.
+        if catalogs::has_link_arg(&args) && !catalogs::accepts_links(app) {
+            return;
+        }
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }));
+    builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .on_window_event(|window, event| {
             // Closing the launcher also closes any open browser-game windows.
@@ -511,14 +535,30 @@ pub fn run() {
                 let _ = w.set_title(&title);
             }
             spawn_launcher_check(&handle);
-            // Periodically re-check the catalog (and the launcher itself) so
+
+            // toybox://add links: the one we were started with, and any that
+            // arrive later (forwarded by the single-instance plugin, or sent
+            // by macOS to the running app). Branded single-catalog launchers
+            // neither register the scheme nor act on it.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                #[cfg(any(windows, target_os = "linux"))]
+                if catalogs::accepts_links(&handle) {
+                    register_protocol(&handle);
+                }
+                if let Ok(Some(urls)) = handle.deep_link().get_current() {
+                    catalogs::handle_links(&handle, &urls);
+                }
+                let h = handle.clone();
+                handle.deep_link().on_open_url(move |ev| catalogs::handle_links(&h, &ev.urls()));
+            }
+
+            // Periodically re-check every catalog (and the launcher itself) so
             // updates arrive while open.
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(REFRESH_INTERVAL).await;
-                    if let Err(e) = load_catalog(&handle).await {
-                        eprintln!("background catalog refresh failed: {e}");
-                    }
+                    catalogs::refresh(&handle, None).await;
                     spawn_launcher_check(&handle);
                 }
             });
@@ -527,6 +567,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             get_catalog,
+            preview_source,
+            add_source,
+            import_sources,
+            remove_source,
+            set_source_enabled,
+            export_sources,
+            take_pending_links,
             get_news,
             get_library,
             add_to_library,

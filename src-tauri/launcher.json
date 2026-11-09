@@ -1,9 +1,9 @@
 {
   "name": "Toybox",
-  "tagline": "Early builds, straight from the bench",
+  "tagline": "Early builds, straight from the people making them",
   "logo": "",
-  "catalogUrl": "https://example.com/catalog.json",
+  "catalogUrl": "",
   "rssUrl": "",
-  "updateUrl": "",
+  "updateUrl": "https://github.com/danielkrainas/toybox/releases/latest/download/version.json",
   "theme": { "primary": "#14161b", "accent": "#4a90d9" }
 }

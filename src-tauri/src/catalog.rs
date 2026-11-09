@@ -1,5 +1,5 @@
-//! The remote catalog: the single source of truth for what games exist and
-//! which version of each is current.
+//! A catalog: one publisher's list of games, and which version of each is
+//! current. The launcher can follow several catalogs (see `sources`).
 
 use std::collections::HashMap;
 
@@ -13,6 +13,27 @@ use crate::location::{resolve_image, Location};
 pub struct Catalog {
     #[serde(default)]
     pub version: String,
+
+    // ---- Optional publisher info, shown when the launcher follows several
+    // catalogs (all relative URLs resolve against the catalog) ----
+    /// Display name of the catalog, e.g. "Bench Studio playtests".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Who publishes it.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub support_url: Option<String>,
+    /// Accent color (`#rrggbb`) used for this catalog's games.
+    #[serde(default)]
+    pub accent: Option<String>,
+
     #[serde(default)]
     pub games: Vec<Game>,
 }
@@ -183,7 +204,10 @@ pub fn parse(bytes: &[u8]) -> Result<Catalog> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameView {
+    /// The library key, `"<sourceId>:<gameId>"`; unique across catalogs.
     pub id: String,
+    pub source_id: String,
+    pub game_id: String,
     pub name: String,
     pub version: String,
     pub description: String,
@@ -205,9 +229,11 @@ pub struct GameView {
 }
 
 impl GameView {
-    pub fn from_game(g: &Game, base: Option<&Location>) -> Self {
+    pub fn from_game(g: &Game, base: Option<&Location>, source_id: &str) -> Self {
         GameView {
-            id: g.id.clone(),
+            id: crate::library::game_key(source_id, &g.id),
+            source_id: source_id.to_string(),
+            game_id: g.id.clone(),
             name: g.name.clone(),
             version: g.version.clone(),
             description: g.description.clone(),
@@ -269,12 +295,24 @@ mod tests {
         assert!(g.resolve_build(None).is_err(), "browser games are never installed");
         let base = Location::parse("https://cdn.example.com/catalog.json", None).unwrap();
         assert_eq!(g.play_location(Some(&base)).unwrap().display(), "https://cdn.example.com/web/w/index.html");
-        let v = GameView::from_game(g, Some(&base));
-        assert_eq!((v.kind, v.version.as_str()), ("web", ""));
+        let v = GameView::from_game(g, Some(&base), "s1");
+        assert_eq!((v.kind, v.version.as_str(), v.id.as_str()), ("web", "", "s1:w"));
+    }
+
+    #[test]
+    fn reads_publisher_fields() {
+        let c = parse(br##"{"name":"Bench Studio playtests","publisher":"Bench Studio","icon":"icon.png",
+            "website":"https://bench.example","supportUrl":"mailto:hi@bench.example","accent":"#e0a030","games":[]}"##).unwrap();
+        assert_eq!(c.publisher.as_deref(), Some("Bench Studio"));
+        assert_eq!(c.support_url.as_deref(), Some("mailto:hi@bench.example"));
+        assert_eq!(c.accent.as_deref(), Some("#e0a030"));
+        // Plain single-catalog files stay valid.
+        assert!(parse(br#"{"games":[]}"#).unwrap().name.is_none());
     }
 
     #[test]
     fn rejects_bad_ids() {
+        assert!(parse(br#"{"games":[{"id":"a:b","name":"A","version":"1"}]}"#).is_err());
         assert!(parse(br#"{"games":[{"id":"../evil","name":"A","version":"1"}]}"#).is_err());
         assert!(parse(br#"{"games":[{"id":"a","name":"A","version":"1"},{"id":"a","name":"B","version":"1"}]}"#).is_err());
     }

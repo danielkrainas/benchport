@@ -3,6 +3,7 @@
   "tagline": "Playtest builds from the bench",
   "logo": "../src-tauri/icons/icon.svg",
   "catalogUrl": "demo/catalog.json",
+  "allowAddingCatalogs": true,
   "rssUrl": "demo/news.xml",
   "theme": { "primary": "#14161b", "accent": "#4a90d9" }
 }

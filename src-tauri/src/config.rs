@@ -9,6 +9,11 @@
 //!
 //! Forks normally just edit `src-tauri/launcher.json` and rebuild; options 1-3
 //! let a developer or user repoint an existing build without recompiling.
+//!
+//! `catalogUrl` is optional: when set it becomes the launcher's first (pinned)
+//! catalog. Without one the launcher is a general Toybox that players add
+//! catalogs to; with one it's a branded single-catalog launcher (no adding,
+//! no `toybox://` links) unless `allowAddingCatalogs` says otherwise.
 
 use std::path::PathBuf;
 
@@ -29,14 +34,34 @@ pub struct LauncherConfig {
     pub logo: Option<String>,
     #[serde(default)]
     pub tagline: Option<String>,
+    /// The built-in catalog (optional; players can add catalogs themselves).
+    #[serde(default)]
     pub catalog_url: String,
+    /// Let players add other catalogs (Settings, `toybox://add` links).
+    /// Defaults to true without a `catalogUrl`, false with one; see
+    /// [`LauncherConfig::allows_adding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_adding_catalogs: Option<bool>,
+    /// Keep this config's name/logo/theme even when several catalogs are
+    /// added (by default a neutral theme is used then).
     #[serde(default)]
     pub rss_url: Option<String>,
     /// Where the launcher's own `version.json` lives (enables self-update).
     #[serde(default)]
     pub update_url: Option<String>,
     #[serde(default)]
+    pub keep_branding: bool,
+    #[serde(default)]
     pub theme: Theme,
+}
+
+impl LauncherConfig {
+    /// Whether players may add catalogs (and so whether `toybox://` links do
+    /// anything). A launcher with its own catalog is single-catalog unless it
+    /// opts in.
+    pub fn allows_adding(&self) -> bool {
+        self.allow_adding_catalogs.unwrap_or(self.catalog_url.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,8 +98,13 @@ pub struct LoadedConfig {
 }
 
 impl LoadedConfig {
-    pub fn catalog_location(&self) -> Result<Location> {
-        Location::parse(&self.config.catalog_url, self.base.as_ref())
+    /// The built-in catalog, if the config names one.
+    pub fn catalog_location(&self) -> Option<Result<Location>> {
+        let url = self.config.catalog_url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(Location::parse(url, self.base.as_ref()))
     }
 
     pub fn rss_location(&self) -> Option<Result<Location>> {
@@ -146,8 +176,8 @@ pub fn load(app: &AppHandle) -> LoadedConfig {
 fn read_file(path: &PathBuf) -> Result<LauncherConfig> {
     let text = std::fs::read_to_string(path)?;
     let cfg: LauncherConfig = serde_json::from_str(&text)?;
-    if cfg.catalog_url.trim().is_empty() {
-        return Err(Error::msg("catalogUrl is empty"));
+    if cfg.catalog_url.trim().is_empty() && !cfg.allows_adding() {
+        return Err(Error::msg("catalogUrl is empty and allowAddingCatalogs is false, so there would be no games"));
     }
     Ok(cfg)
 }
