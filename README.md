@@ -204,6 +204,40 @@ python3 tools/publish-launcher.py path/to/version.json 0.2.0 \
 
 Bump `version` in `src-tauri/tauri.conf.json` (and `Cargo.toml`) before building. That's the version the launcher reports.
 
+### Building releases with GitHub Actions
+
+`.github/workflows/release.yml` does all of the above for every platform. Bump the
+version in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then push a matching
+tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+It runs the tests, builds Linux (x86_64), Windows (x64) and macOS (Apple Silicon and
+Intel), and opens a **draft release** containing:
+
+| File | For |
+|---|---|
+| `.AppImage`, `.deb`, `.rpm` | Linux installs (the AppImage is also the self-update artifact) |
+| `-setup.exe`, `.msi` | Windows installers |
+| `_windows_x64_portable.zip` | Portable Windows build, and the self-update artifact |
+| `.dmg` | macOS installs |
+| `_macos_<arch>.app.zip` | macOS self-update artifacts |
+| `version.json` | The self-update manifest, already pointing at this release's files |
+
+Check the draft and publish it. Launchers built with
+`"updateUrl": "https://github.com/<owner>/<repo>/releases/latest/download/version.json"`
+then see it as the latest version. Tags with a pre-release suffix (`v0.3.0-1`) become
+pre-releases, which `latest` skips. MSI only accepts numeric pre-release suffixes, so
+use `-1`, not `-beta`. Running the workflow by hand (*Actions → Release → Run
+workflow*) builds everything as downloadable artifacts without creating a release.
+
+The builds aren't code-signed, so Windows SmartScreen and macOS Gatekeeper will warn
+on first launch (on macOS, right-click → *Open*). The launcher downloads self-updates
+itself, without the browser's quarantine/"downloaded from the internet" flag, so they
+shouldn't trigger the warning again (unverified on Windows and macOS).
+
 **What can update itself:** the Linux AppImage, Windows, and macOS `.app` installs in
 a folder the user can write to. Installs in system locations, like the `.deb`/`.rpm`
 packages in `/usr/bin` or an MSI under `Program Files`, can't replace themselves. They
@@ -250,6 +284,7 @@ ui/             index.html, styles.css, js/ (app, views, store, util, icons)
 examples/       demo config + generator for a local demo catalog
 tools/          publish.py (games), publish-launcher.py (launcher releases)
 docs/           README screenshot
+.github/        release workflow (GitHub Actions)
 ```
 
 Run the tests with `cd src-tauri && cargo test`.

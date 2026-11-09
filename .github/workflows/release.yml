@@ -1,0 +1,201 @@
+# Builds the launcher for Linux, Windows and macOS.
+#
+# * Push a tag like `v0.2.0` (matching "version" in src-tauri/tauri.conf.json)
+#   to build everything and create a *draft* GitHub release with the installers,
+#   the self-update artifacts and a ready-made version.json. Review it, then
+#   publish it.
+# * Run it manually (Actions → Release → Run workflow) to just build and
+#   download the artifacts, without a release.
+#
+# Once a release is published, launchers built with
+#   "updateUrl": "https://github.com/<owner>/<repo>/releases/latest/download/version.json"
+# pick it up automatically.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Test + version check
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          conf=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+          echo "tauri.conf.json: $conf, Cargo.toml: $cargo"
+          if [ "$conf" != "$cargo" ]; then
+            echo "::error::Version mismatch: tauri.conf.json has $conf but Cargo.toml has $cargo"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$conf" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} doesn't match version $conf in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          echo "version=$conf" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04 # oldest supported glibc → widest AppImage compatibility
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      - name: Build
+        run: npx tauri build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      # Collect installers plus the files the launcher's self-updater consumes:
+      #   linux   → the AppImage itself
+      #   windows → a portable zip containing benchport.exe
+      #   macos   → a zip of Benchport.app
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=target/${{ matrix.target }}/release
+          bundle=src-tauri/$out/bundle
+          mkdir -p dist
+          case "${{ matrix.name }}" in
+            linux-*)
+              cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm dist/
+              ;;
+            windows-*)
+              cp "$bundle"/nsis/*.exe "$bundle"/msi/*.msi dist/
+              7z a -tzip "dist/Benchport_${VERSION}_windows_x64_portable.zip" "./src-tauri/$out/benchport.exe"
+              ;;
+            macos-*)
+              arch="${{ matrix.name }}"; arch="${arch#macos-}"
+              cp "$bundle"/dmg/*.dmg dist/
+              ditto -c -k --sequesterRsrc --keepParent "$bundle/macos/Benchport.app" "dist/Benchport_${VERSION}_macos_${arch}.app.zip"
+              ;;
+          esac
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchport-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: [check, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: benchport-*
+          merge-multiple: true
+
+      - name: Write version.json
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          page="https://github.com/${GITHUB_REPOSITORY}/releases/latest"
+          publish() { # platform file [extra args]
+            local platform=$1 file=$2; shift 2
+            python3 tools/publish-launcher.py dist/version.json "$VERSION" "dist/$file" \
+              --platform "$platform" --url "$base/$file" --page "$page" "$@"
+          }
+          publish linux "$(cd dist && ls *.AppImage)"
+          publish windows "Benchport_${VERSION}_windows_x64_portable.zip" --executable benchport.exe
+          publish macos-aarch64 "Benchport_${VERSION}_macos_aarch64.app.zip"
+          publish macos-x86_64 "Benchport_${VERSION}_macos_x86_64.app.zip"
+          cat dist/version.json
+
+      - name: Create or update the draft release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --title "Benchport $VERSION" --generate-notes \
+              $([[ "$VERSION" == *-* ]] && echo --prerelease)
+          fi
