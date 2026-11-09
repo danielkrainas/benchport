@@ -214,7 +214,7 @@ async function loadConfig() {
 async function loadLibrary(initial = false) {
   const v = await invoke('get_library');
   S.library = v.library;
-  S.running = new Set(v.running);
+  S.running = new Map(v.running.map((r) => [r.gameId, r.version ?? null]));
   if (initial) for (const j of v.jobs) S.jobs.set(j.gameId, j);
 }
 
@@ -503,7 +503,7 @@ listen('library://changed', async () => {
 });
 
 listen('game://state', ({ payload }) => {
-  if (payload.running) S.running.add(payload.gameId);
+  if (payload.running) S.running.set(payload.gameId, payload.version ?? null);
   else S.running.delete(payload.gameId);
   if (!payload.running && payload.exitCode != null && payload.exitCode !== 0) {
     toast({ title: `${game(payload.gameId)?.name} closed unexpectedly`, sub: `Exit code ${payload.exitCode}`, kind: 'err' });

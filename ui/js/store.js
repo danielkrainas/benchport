@@ -6,7 +6,7 @@ export const S = {
   catalogLoading: true,
   catalogError: null,
   library: { games: {}, settings: { autoUpdate: true } },
-  running: new Set(),
+  running: new Map(), // id -> version playing (null for browser games)
   jobs: new Map(), // id -> progress (active only)
   history: [], // finished jobs this session, newest first
   news: [],
@@ -59,6 +59,13 @@ export const isWeb = (id) => catalogGame(id)?.kind === 'web';
 
 /** In the library and ready to play right now (installed, or a browser game). */
 export const playable = (id) => !!entry(id)?.installed || (isWeb(id) && !!entry(id));
+
+/** "v1.3.0" for the build that's playing, plus whether it's an older kept one. */
+export function playingVersion(id) {
+  const v = S.running.get(id);
+  if (!v) return null;
+  return { version: v, older: entry(id)?.installed?.version !== v };
+}
 
 /**
  * none | owned | installing | installed | update | running | unavailable

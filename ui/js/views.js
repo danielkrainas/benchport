@@ -1,7 +1,7 @@
 // Pure render functions: state in, HTML string out.
 
 import { icon } from './icons.js';
-import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel, isWeb, playable, kept, diskUsage } from './store.js';
+import { S, ACTIVE_PHASES, catalogGame, entry, game, status, libraryIds, updatesAvailable, featured, phaseLabel, isWeb, playable, kept, diskUsage, playingVersion } from './store.js';
 import { esc, cssUrl, hashHue, initials, bytes, playtime, ago, niceDate, eta, platformName } from './util.js';
 
 // ---------------------------------------------------------------- pieces
@@ -97,8 +97,9 @@ function versionsBlock(id) {
   const older = kept(id);
   const a = `data-id="${esc(id)}"`;
   const running = S.running.has(id);
-  const row = (k, current) => `<div class="ver-row">
-      <div class="vv"><b>v${esc(k.version)}</b>${current ? '<span class="chip accent">Current</span>' : ''}</div>
+  const playing = S.running.get(id);
+  const row = (k, current) => `<div class="ver-row${playing === k.version ? ' playing' : ''}">
+      <div class="vv"><b>v${esc(k.version)}</b>${current ? '<span class="chip accent">Current</span>' : ''}${playing === k.version ? `<span class="chip ok">${icon('play')} Playing</span>` : ''}</div>
       <div class="vm">Installed ${esc(ago(k.installedAt).toLowerCase())} · ${bytes(k.sizeBytes)}</div>
       <div class="va">
         <button class="btn sm ghost" data-action="play" ${a}${current ? '' : ` data-version="${esc(k.version)}"`}${running ? ' disabled' : ''}>${icon('play')} Play</button>
@@ -148,7 +149,7 @@ function statusPill(id) {
   const job = S.jobs.get(id);
   switch (status(id)) {
     case 'installing': return `<span class="pill dl" data-prog-pct="${esc(id)}">${job?.percent != null ? Math.floor(overallPercent(job)) + '%' : '…'}</span>`;
-    case 'running': return `<span class="pill ok">Playing</span>`;
+    case 'running': { const p = playingVersion(id); return `<span class="pill ok">Playing${p ? ` v${esc(p.version)}` : ''}</span>`; }
     case 'installed': return isWeb(id) ? `<span class="pill ok">In library</span>` : `<span class="pill ok">Installed</span>`;
     case 'update': return `<span class="pill upd">Update</span>`;
     case 'owned': return `<span class="pill muted">In library</span>`;
@@ -300,7 +301,8 @@ export function sidebar() {
         const g = game(id);
         const st = status(id);
         const job = S.jobs.get(id);
-        const right = st === 'running' ? '<span class="gstate run">Playing</span>'
+        const pv = playingVersion(id);
+        const right = st === 'running' ? `<span class="gstate run"${pv ? ` title="Playing v${esc(pv.version)}${pv.older ? ' (previous build)' : ''}"` : ''}>Playing</span>`
           : st === 'update' ? '<span class="gstate upd">Update</span>'
           : st === 'installing' ? `<span class="gstate dl" data-prog-pct="${esc(id)}">${Math.floor(overallPercent(job))}%</span>` : '';
         const installed = st !== 'owned' && st !== 'none' && st !== 'unavailable' && st !== 'installing';
@@ -345,7 +347,8 @@ export function spotlight() {
   const kicker = st === 'update' ? `<span class="chip glass">${icon('sparkle')} New version · v${esc(g.version)}</span>`
     : g.featured ? `<span class="chip glass">${icon('sparkle')} Featured</span>`
     : `<span class="chip glass">${g.kind === 'web' ? 'Browser game' : `v${esc(g.version)}`}</span>`;
-  const note = st === 'installed' ? 'Ready to play' : st === 'running' ? 'Now playing' : '';
+  const pv = playingVersion(g.id);
+  const note = st === 'installed' ? 'Ready to play' : st === 'running' ? `Now playing${pv ? ` v${esc(pv.version)}` : ''}` : '';
   const thumbs = list.length > 1
     ? `<div class="spot-list">${list.map((t, j) => `
         <button class="spot-thumb${j === i ? ' active' : ''}" data-action="spot" data-i="${j}" style="--dur:${SPOT_MS}ms">
@@ -477,13 +480,16 @@ export function gamePage(id) {
   const a = `data-id="${esc(id)}"`;
 
   const web = g.kind === 'web';
+  const pv = playingVersion(id);
   const stats = [];
   if (web) {
     if (e) stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
     stats.push(['Runs in', g.opensInBrowser ? 'Your browser' : 'The launcher']);
-  } else if (inst) {
-    stats.push(['Last played', ago(e.lastPlayed)], ['Play time', playtime(e.playtimeSecs)]);
-    stats.push(['Version', st === 'update' ? `<span class="upd">v${esc(inst.version)} → v${esc(g.version)}</span>` : `v${esc(inst.version)}`]);
+  } else if (inst || pv) {
+    if (pv) stats.push(['Now playing', `<span class="playing">v${esc(pv.version)}${pv.older ? ' <span class="muted">· previous build</span>' : ''}</span>`]);
+    else stats.push(['Last played', ago(e.lastPlayed)]);
+    stats.push(['Play time', playtime(e.playtimeSecs)]);
+    if (inst) stats.push(['Version', st === 'update' ? `<span class="upd">v${esc(inst.version)} → v${esc(g.version)}</span>` : `v${esc(inst.version)}`]);
     stats.push(['Size', bytes(diskUsage(id))]);
   } else {
     if (g.version) stats.push(['Version', `v${esc(g.version)}`]);

@@ -255,6 +255,7 @@ p { margin: 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 99px; font-size: 12px; font-weight: 600;
   background: var(--surface-2); color: var(--text-dim); }
 .chip.accent { background: rgb(var(--accent-rgb) / .16); color: var(--accent-hover); }
+.chip.ok { background: rgb(47 179 107 / .16); color: var(--play-hover); }
 .chip.glass { background: rgb(255 255 255 / .12); color: #fff; backdrop-filter: blur(8px); }
 .chip .ic { width: 13px; height: 13px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -557,6 +558,8 @@ p { margin: 0; }
 .ver-row { display: grid; grid-template-columns: minmax(120px, auto) 1fr auto; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
 .ver-row .vv { display: flex; align-items: center; gap: 8px; }
 .ver-row .vv b { font-weight: 700; }
+.stat .v .playing { color: var(--play); }
+.stat .v .playing .muted { color: var(--text-faint); font-weight: 500; }
 .ver-row .vm { color: var(--text-faint); font-size: 13px; }
 .ver-row .va { display: flex; gap: 6px; }
 .btn.danger-h:hover { color: var(--danger); }

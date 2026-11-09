@@ -64,8 +64,15 @@ struct CatalogView {
 #[serde(rename_all = "camelCase")]
 struct LibraryView {
     library: Library,
-    running: Vec<String>,
+    running: Vec<RunningView>,
     jobs: Vec<Progress>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunningView {
+    game_id: String,
+    version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -201,7 +208,13 @@ async fn get_news(app: AppHandle) -> Result<Vec<NewsItem>> {
 fn get_library(app: AppHandle) -> LibraryView {
     let st = state(&app);
     let library = st.library.lock().unwrap().clone();
-    let running = st.running.lock().unwrap().keys().cloned().collect();
+    let running = st
+        .running
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, r)| RunningView { game_id: id.clone(), version: r.version().map(str::to_string) })
+        .collect();
     let jobs = st.jobs.lock().unwrap().values().map(|j| j.progress.clone()).collect();
     LibraryView { library, running, jobs }
 }

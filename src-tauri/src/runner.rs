@@ -19,6 +19,8 @@ use crate::state::{state, RunningGame};
 struct GameState {
     game_id: String,
     running: bool,
+    /// The build that is playing (native games only).
+    version: Option<String>,
     exit_code: Option<i32>,
 }
 
@@ -68,9 +70,12 @@ pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
     st.running
         .lock()
         .unwrap()
-        .insert(id.to_string(), RunningGame::Process(child.clone()));
+        .insert(id.to_string(), RunningGame::Process { child: child.clone(), version: installed.version.clone() });
     st.update_library(app, |lib| lib.entry(id).last_played = Some(started))?;
-    let _ = app.emit("game://state", GameState { game_id: id.to_string(), running: true, exit_code: None });
+    let _ = app.emit(
+        "game://state",
+        GameState { game_id: id.to_string(), running: true, version: Some(installed.version.clone()), exit_code: None },
+    );
 
     let (app, id) = (app.clone(), id.to_string());
     std::thread::spawn(move || {
@@ -97,7 +102,7 @@ fn finish_session(app: &AppHandle, id: &str, started: u64, exit_code: Option<i32
         e.playtime_secs += elapsed;
         e.last_played = Some(now());
     });
-    let _ = app.emit("game://state", GameState { game_id: id.to_string(), running: false, exit_code });
+    let _ = app.emit("game://state", GameState { game_id: id.to_string(), running: false, version: None, exit_code });
     // An update may have been held back while the game was running.
     if !exiting {
         crate::installer::run_auto_updates(app);
@@ -114,7 +119,7 @@ pub fn finish_web_sessions(app: &AppHandle) {
         .iter()
         .filter_map(|(id, r)| match r {
             RunningGame::Window { started, .. } => Some((id.clone(), *started)),
-            RunningGame::Process(_) => None,
+            RunningGame::Process { .. } => None,
         })
         .collect();
     for (id, started) in open {
@@ -169,7 +174,7 @@ fn launch_web(app: &AppHandle, game: &Game, base: &Location) -> Result<()> {
         e.name = Some(game.name.clone());
         e.last_played = Some(started);
     })?;
-    let _ = app.emit("game://state", GameState { game_id: game.id.clone(), running: true, exit_code: None });
+    let _ = app.emit("game://state", GameState { game_id: game.id.clone(), running: true, version: None, exit_code: None });
 
     let (app2, id) = (app.clone(), game.id.clone());
     window.on_window_event(move |ev| {
@@ -183,7 +188,7 @@ fn launch_web(app: &AppHandle, game: &Game, base: &Location) -> Result<()> {
 pub fn stop(app: &AppHandle, id: &str) -> Result<()> {
     let running = state(app).running.lock().unwrap().get(id).cloned();
     match running {
-        Some(RunningGame::Process(c)) => c.lock().unwrap().kill().map_err(|e| Error::msg(format!("Couldn't stop the game: {e}"))),
+        Some(RunningGame::Process { child: c, .. }) => c.lock().unwrap().kill().map_err(|e| Error::msg(format!("Couldn't stop the game: {e}"))),
         Some(RunningGame::Window { label, .. }) => {
             if let Some(w) = app.get_webview_window(&label) {
                 w.destroy()?;

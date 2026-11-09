@@ -37,10 +37,20 @@ pub struct Job {
 
 #[derive(Clone)]
 pub enum RunningGame {
-    /// A native game process.
-    Process(Arc<Mutex<Child>>),
+    /// A native game process, running the build `version`.
+    Process { child: Arc<Mutex<Child>>, version: String },
     /// A browser game in a launcher window.
     Window { label: String, started: u64 },
+}
+
+impl RunningGame {
+    /// The build being played (browser games have none).
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            RunningGame::Process { version, .. } => Some(version),
+            RunningGame::Window { .. } => None,
+        }
+    }
 }
 
 pub struct AppState {
