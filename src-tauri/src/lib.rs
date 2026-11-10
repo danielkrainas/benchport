@@ -10,6 +10,7 @@ mod runner;
 mod selfupdate;
 mod sources;
 mod state;
+mod support;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
@@ -275,7 +276,7 @@ fn spawn_launcher_check(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let auto = state(&app).library.lock().unwrap().settings.auto_update_launcher;
         if let Err(e) = selfupdate::check(&app, auto).await {
-            eprintln!("launcher update check failed: {e}");
+            log::warn!("launcher update check failed: {e}");
         }
     });
 }
@@ -324,6 +325,7 @@ fn open_path(app: AppHandle, which: String) -> Result<()> {
     let path = match which.as_str() {
         "data" => st.paths.data.clone(),
         "games" => st.paths.games.clone(),
+        "logs" => support::log_dir(&app).ok_or_else(|| Error::msg("No log folder"))?,
         "config" => config::user_config_path(&app)
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .ok_or_else(|| Error::msg("No config directory"))?,
@@ -333,8 +335,36 @@ fn open_path(app: AppHandle, which: String) -> Result<()> {
     app.opener().open_path(path.display().to_string(), None::<&str>).map_err(|e| Error::msg(e.to_string()))
 }
 
+/// Open the "Report a problem" link for a library game, pre-filled with the
+/// game, version and platform.
+#[tauri::command]
+fn report_problem(app: AppHandle, id: String) -> Result<()> {
+    let url = support::feedback_url(&app, &id)?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| Error::msg(e.to_string()))
+}
+
+/// Everything useful for a bug report, as plain text.
+#[tauri::command]
+fn get_diagnostics(app: AppHandle) -> String {
+    support::diagnostics(&app)
+}
+
+/// Errors from the UI go to the log file too.
+#[tauri::command]
+fn log_ui(level: String, message: String) {
+    let message: String = message.chars().take(2000).collect();
+    match level.as_str() {
+        "error" => log::error!(target: "ui", "{message}"),
+        "warn" => log::warn!(target: "ui", "{message}"),
+        _ => log::info!(target: "ui", "{message}"),
+    }
+}
+
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Result<()> {
+    if url.trim().get(..7).is_some_and(|s| s.eq_ignore_ascii_case("mailto:")) {
+        return app.opener().open_url(url.trim(), None::<&str>).map_err(|e| Error::msg(e.to_string()));
+    }
     match Location::parse(&url, None)? {
         Location::Remote(u) => app.opener().open_url(u.as_str(), None::<&str>).map_err(|e| Error::msg(e.to_string())),
         Location::Local(_) => Err(Error::msg("Only web links can be opened")),
@@ -367,7 +397,7 @@ fn sync_config_source(paths: &Paths, list: &mut SourceList, cfg: &config::Loaded
     let url = match cfg.catalog_location() {
         Some(Ok(l)) => Some(l.display()),
         Some(Err(e)) => {
-            eprintln!("invalid catalogUrl in {}: {e}", cfg.source);
+            log::warn!("invalid catalogUrl in {}: {e}", cfg.source);
             None
         }
         None => None,
@@ -378,7 +408,7 @@ fn sync_config_source(paths: &Paths, list: &mut SourceList, cfg: &config::Loaded
     }
     if changed {
         if let Err(e) = list.save(&paths.sources_file) {
-            eprintln!("couldn't save sources.json: {e}");
+            log::warn!("couldn't save sources.json: {e}");
         }
     }
 }
@@ -409,7 +439,7 @@ fn migrate_single_catalog(paths: &Paths, list: &mut SourceList, library: &mut Li
     let source_id = list.config_source().map(|s| s.id.clone()).unwrap_or_else(|| "legacy".into());
     if library.migrate(&source_id, &paths.games) {
         if let Err(e) = library.save(&paths.library_file) {
-            eprintln!("couldn't save the migrated library: {e}");
+            log::warn!("couldn't save the migrated library: {e}");
         }
     }
 }
@@ -441,9 +471,14 @@ fn init_state(app: &AppHandle) -> Result<AppState> {
             }
         }
     }
+    // Keep recent partial game downloads so they can resume; drop the rest.
     if let Ok(rd) = std::fs::read_dir(&paths.downloads) {
         for e in rd.flatten() {
-            let _ = std::fs::remove_file(e.path());
+            let name = e.file_name().to_string_lossy().to_string();
+            let fresh = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < installer::PART_MAX_AGE);
+            if !(name.contains('~') && name.ends_with(".zip.part") && fresh) {
+                let _ = std::fs::remove_file(e.path());
+            }
         }
     }
 
@@ -499,7 +534,7 @@ fn register_protocol(app: &AppHandle) {
     };
     if wanted {
         if let Err(e) = app.deep_link().register_all() {
-            eprintln!("couldn't register the {}:// link handler: {e}", catalogs::PROTOCOL);
+            log::warn!("couldn't register the {}:// link handler: {e}", catalogs::PROTOCOL);
         }
     }
 }
@@ -523,6 +558,7 @@ pub fn run() {
         }
     }));
     builder
+        .plugin(support::log_plugin())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .on_window_event(|window, event| {
@@ -535,6 +571,13 @@ pub fn run() {
             let handle = app.handle().clone();
             let st = init_state(&handle)?;
             let title = st.config.read().unwrap().config.name.clone();
+            log::info!(
+                "{title} {} starting on {} {}, config: {}",
+                app.package_info().version,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                st.config.read().unwrap().source
+            );
             app.manage(st);
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_title(&title);
@@ -601,6 +644,9 @@ pub fn run() {
             check_launcher_update,
             download_launcher_update,
             restart_to_update,
+            report_problem,
+            get_diagnostics,
+            log_ui,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Toybox")

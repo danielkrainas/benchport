@@ -59,6 +59,8 @@ GAMES = [
         "shape": "platformer",
         "description": "Early platformer prototype. We're tuning jump arcs, coyote time and wall slides — tell us which settings feel best.\n\nControls: arrow keys / WASD to move, space to jump.",
         "releaseNotes": "• Coyote time raised from 80ms to 110ms\n• Fixed double-jump firing on ledges\n• New test level: \"The Gauntlet\"",
+        # Other games fall back to the catalog's supportUrl (an email link).
+        "feedbackUrl": "https://example.com/bench/feedback?game={gameId}&version={version}&os={platform}",
     },
     {
         "id": "orbital-drift",
@@ -423,6 +425,7 @@ def build_catalog(root, games, meta, catalog_hue):
             "releaseNotes": g["releaseNotes"],
             "released": date.today().isoformat(),
             "featured": g["featured"],
+            **({"feedbackUrl": g["feedbackUrl"]} if "feedbackUrl" in g else {}),
         })
 
     catalog = {"version": date.today().isoformat(), **meta, "games": entries}

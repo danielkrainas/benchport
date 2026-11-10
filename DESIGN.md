@@ -86,7 +86,10 @@ The top-level `name`/`publisher`/`icon`/`description`/`website`/`supportUrl`/`ac
 - Automatic update detection via version strings
 - Optional RSS news panel
 - Configurable branding (name + logo + basic theme)
-- Integrity check (sha256) on downloads
+- Integrity check (sha256) on downloads; resumable downloads and a free-space check before installing
+- "Report a problem" links pre-filled with game, version and platform (`feedbackUrl` per game, or the catalog's `supportUrl`)
+- A log file and a copyable diagnostics report for bug reports
+- Optionally signed launcher updates (Ed25519 signature on `version.json`, key in `updatePublicKey`)
 - Local library state (what the user has installed and at what version)
 
 ### High-Level Flow

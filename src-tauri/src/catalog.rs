@@ -89,6 +89,12 @@ pub struct Game {
     /// Featured games appear in the home page spotlight.
     #[serde(default)]
     pub featured: bool,
+    /// Where players report problems: a web page or `mailto:` link, which may
+    /// contain `{game}`, `{gameId}`, `{version}`, `{catalog}`,
+    /// `{launcherVersion}` and `{platform}` placeholders. Defaults to the
+    /// catalog's `supportUrl`.
+    #[serde(default)]
+    pub feedback_url: Option<String>,
 
     /// Per-platform overrides keyed by "windows", "macos" or "linux".
     #[serde(default)]
@@ -226,6 +232,8 @@ pub struct GameView {
     pub kind: &'static str,
     pub play_url: Option<String>,
     pub opens_in_browser: bool,
+    /// The raw `feedbackUrl` template (the launcher fills it in when used).
+    pub feedback_url: Option<String>,
 }
 
 impl GameView {
@@ -250,6 +258,7 @@ impl GameView {
             kind: if g.is_web() { "web" } else { "native" },
             play_url: g.is_web().then(|| g.play_location(base).ok()).flatten().map(|l| l.display()),
             opens_in_browser: g.opens_in_browser(),
+            feedback_url: g.feedback_url.clone().filter(|u| !u.trim().is_empty()),
         }
     }
 }

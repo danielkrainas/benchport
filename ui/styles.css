@@ -601,6 +601,9 @@ p { margin: 0; }
 
 .pub-card .pub-head { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .pub-card .t { font-weight: 700; }
+.report-card { padding: 14px 18px; }
+.report-card .t { font-weight: 700; }
+.report-card .s { color: var(--text-dim); font-size: 13px; margin: 4px 0 12px; line-height: 1.45; }
 .pub-card .s { color: var(--text-faint); font-size: 13px; }
 .pub-card .pub-links { display: flex; gap: 16px; padding: 0 0 12px; }
 

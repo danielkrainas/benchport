@@ -15,12 +15,35 @@ const gateEl = $('#gate');
 
 // ---------------------------------------------------------------- helpers
 
+/** Write to the launcher's log file (Settings → Help → Open log folder). */
+export function logUi(level, message) {
+  invoke('log_ui', { level, message: String(message) }).catch(() => {});
+}
+
 async function call(cmd, args) {
   try {
     return await invoke(cmd, args);
   } catch (e) {
+    logUi('warn', `${cmd} failed: ${e}`);
     toast({ title: 'Something went wrong', sub: String(e), kind: 'err' });
     throw e;
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Older WebViews: fall back to a hidden textarea.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
   }
 }
 
@@ -493,6 +516,15 @@ const actions = {
   async 'open-url'({ url }) {
     if (url) await call('open_url', { url });
   },
+  async 'report-problem'({ id }) {
+    S.menuOpen = null;
+    await call('report_problem', { id });
+  },
+  async 'copy-diagnostics'() {
+    const text = await call('get_diagnostics');
+    if (await copyText(text)) toast({ title: 'Diagnostics copied', sub: 'Paste them into your message to the game\'s developer.', kind: 'ok' });
+    else toast({ title: "Couldn't copy", sub: 'Open the log folder and attach the log file instead.', kind: 'err' });
+  },
   menu({ menu }) {
     S.menuOpen = S.menuOpen === menu ? null : menu;
     render();
@@ -795,6 +827,10 @@ async function boot() {
   takePendingLinks();
 }
 
+window.addEventListener('error', (e) => logUi('error', `${e.message} (${e.filename}:${e.lineno})`));
+window.addEventListener('unhandledrejection', (e) => logUi('error', `unhandled: ${e.reason?.stack || e.reason}`));
+
 boot().catch((e) => {
+  logUi('error', `failed to start: ${e?.stack || e}`);
   main.innerHTML = `<div class="page"><div class="empty"><h3>Failed to start</h3><p class="selectable">${esc(String(e))}</p></div></div>`;
 });

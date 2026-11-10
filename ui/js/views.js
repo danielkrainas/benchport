@@ -590,6 +590,8 @@ export function gamePage(id) {
     if (kept(id).length) menuItems.push(`<button class="danger" data-action="delete-all-versions" ${a}>${icon('trash')} Delete previous versions</button>`);
     menuItems.push('<hr>', `<button class="danger" data-action="uninstall" ${a}>${icon('trash')} Uninstall</button>`);
   }
+  const canReport = !!(g.feedbackUrl || sourceOf(g.sourceId)?.supportUrl);
+  if (canReport) menuItems.unshift(`<button data-action="report-problem" ${a}>${icon('flag')} Report a problem</button>`);
   if (e) menuItems.push(`<button class="danger" data-action="remove" ${a}>${icon('x')} Remove from library</button>`);
   const menu = menuItems.length && st !== 'installing' && st !== 'running'
     ? `<div class="menu-wrap"><button class="btn lg icon ghost" data-action="menu" data-menu="game" title="More">${icon('more')}</button>
@@ -672,6 +674,7 @@ export function gamePage(id) {
         ${g.tags?.length ? `<div class="tags">${g.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
       </div>
       ${inst ? `<div class="side-card"><div class="kv"><span class="k">Location</span><button class="link" data-action="open-folder" ${a}>${icon('folder')} Open folder</button></div></div>` : ''}
+      ${canReport ? `<div class="side-card report-card"><div class="t">Found a bug?</div><div class="s">Tell the developer what happened. The game, version and your platform are filled in for you.</div><button class="btn sm" data-action="report-problem" ${a}>${icon('flag')} Report a problem</button></div>` : ''}
       ${publisherCard(sourceOf(g.sourceId))}
     </aside>
   </div>`;
@@ -790,6 +793,13 @@ export function settingsPage() {
         `<button class="btn sm ghost" data-action="reload-config">${icon('refresh')} Reload</button>`)}
       ${row('Override file', `Put a <code>launcher.json</code> here to point this launcher at a different catalog:<br><code class="selectable">${esc(c?.userConfigPath || '')}</code>`,
         `<button class="btn sm ghost" data-action="open-path" data-which="config">${icon('folder')} Open</button>`)}
+    </section>
+
+    <section class="set-group"><h2>Help</h2>
+      ${row('Diagnostics', 'Copies your launcher version, platform, catalogs, installed games and recent log, for a bug report. Paste it into your message to the developer.',
+        `<button class="btn sm ghost" data-action="copy-diagnostics">${icon('copy')} Copy</button>`)}
+      ${row('Log files', 'What the launcher has been doing, including any errors.',
+        `<button class="btn sm ghost" data-action="open-path" data-which="logs">${icon('folder')} Open</button>`)}
     </section>
 
     <section class="set-group"><h2>About</h2>

@@ -9,7 +9,9 @@
 #
 # Once a release is published, launchers built with
 #   "updateUrl": "https://github.com/<owner>/<repo>/releases/latest/download/version.json"
-# pick it up automatically.
+# pick it up automatically. With the LAUNCHER_SIGNING_KEY secret set
+# (tools/sign.py keygen), version.json is signed for launchers that have
+# "updatePublicKey".
 
 name: Release
 
@@ -189,6 +191,17 @@ jobs:
           publish macos-aarch64 "Toybox_${VERSION}_macos_aarch64.app.zip"
           publish macos-x86_64 "Toybox_${VERSION}_macos_x86_64.app.zip"
           cat dist/version.json
+
+      - name: Sign version.json
+        env:
+          LAUNCHER_SIGNING_KEY: ${{ secrets.LAUNCHER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${LAUNCHER_SIGNING_KEY}" ]; then
+            python3 tools/sign.py sign dist/version.json
+          else
+            echo "::warning::LAUNCHER_SIGNING_KEY isn't set, so version.json is unsigned. Launchers with updatePublicKey will refuse this update (see tools/sign.py)."
+          fi
 
       - name: Create or update the draft release
         run: |

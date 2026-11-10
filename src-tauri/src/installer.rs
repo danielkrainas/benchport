@@ -146,11 +146,19 @@ pub fn start(app: &AppHandle, id: &str) -> Result<()> {
             window_start: Instant::now(),
             window_bytes: 0,
         };
+        log::info!("{} {key} v{}", if rep.progress.is_update { "updating" } else { "installing" }, game.version);
         let result = install(&app, &key, &game, build, &cancel, &mut rep).await;
         match result {
-            Ok(()) => rep.phase(Phase::Done, Some(100.0)),
-            Err(_) if cancel.load(Ordering::Relaxed) => rep.phase(Phase::Cancelled, None),
+            Ok(()) => {
+                log::info!("installed {key} v{}", game.version);
+                rep.phase(Phase::Done, Some(100.0))
+            }
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                log::info!("cancelled installing {key} v{}", game.version);
+                rep.phase(Phase::Cancelled, None)
+            }
             Err(e) => {
+                log::error!("installing {key} v{} failed: {e}", game.version);
                 rep.progress.error = Some(e.to_string());
                 rep.phase(Phase::Error, None);
             }
@@ -170,7 +178,7 @@ pub fn run_auto_updates(app: &AppHandle) {
     }
     for id in pending_updates(&st) {
         if let Err(e) = start(app, &id) {
-            eprintln!("auto-update of {id} skipped: {e}");
+            log::warn!("auto-update of {id} skipped: {e}");
         }
     }
 }
@@ -209,24 +217,47 @@ async fn install(app: &AppHandle, key: &str, game: &Game, build: ResolvedBuild, 
     tokio::fs::create_dir_all(&downloads).await?;
     tokio::fs::create_dir_all(&games_dir).await?;
 
-    let zip_path = downloads.join(format!("{source_id}-{}-{}.zip.part", game.id, sanitize(&game.version)));
+    // Named per build, so an interrupted download can be resumed later (ids
+    // and versions can't contain '~', so the prefix is unambiguous).
+    let part_prefix = format!("{source_id}~{}~", game.id);
+    let zip_path = downloads.join(format!("{part_prefix}{}.zip.part", sanitize(&game.version)));
     let staging = games_dir.join(format!(".staging-{}", game.id));
+    remove_other_parts(&downloads, &part_prefix, &zip_path);
+    // Keep a partial download for next time if the connection is what failed.
+    let mut keep_part = false;
 
     let res = async {
-        // 1. Download (hashing as we go).
+        // 1. Download (hashing as we go, resuming a partial download).
         rep.phase(Phase::Downloading, Some(0.0));
-        let digest = download(&st.client, &build.download, &zip_path, cancel, rep).await?;
+        let resuming = std::fs::metadata(&zip_path).is_ok_and(|m| m.len() > 0);
+        let mut digest = match download(&st.client, &build.download, &zip_path, cancel, rep).await {
+            Ok(d) => d,
+            Err(e) => {
+                keep_part = !cancel.load(Ordering::Relaxed) && is_resumable(&build.download, &zip_path);
+                return Err(e);
+            }
+        };
 
         // 2. Verify.
         rep.phase(Phase::Verifying, None);
-        match &build.sha256 {
-            Some(expected) if !expected.trim().eq_ignore_ascii_case(&digest) => {
-                return Err(Error::msg(
-                    "The download failed its integrity check (sha256 mismatch). Please try again; if it keeps happening the build on the server may be broken.",
-                ));
-            }
-            Some(_) => {}
-            None => eprintln!("warning: {} has no sha256 in the catalog; skipping integrity check", game.id),
+        let matches = |digest: &str| sha_ok(build.sha256.as_ref(), digest);
+        if !matches(&digest) && resuming {
+            // The partial file may have come from a different upload of
+            // this version; start over once.
+            log::warn!("resumed download of {key} failed verification; downloading it again");
+            let _ = tokio::fs::remove_file(&zip_path).await;
+            rep.progress.downloaded = 0;
+            rep.phase(Phase::Downloading, Some(0.0));
+            digest = download(&st.client, &build.download, &zip_path, cancel, rep).await?;
+            rep.phase(Phase::Verifying, None);
+        }
+        if !matches(&digest) {
+            return Err(Error::msg(
+                "The download failed its integrity check (sha256 mismatch). Please try again; if it keeps happening the build on the server may be broken.",
+            ));
+        }
+        if build.sha256.is_none() {
+            log::warn!("{} has no sha256 in the catalog; skipping integrity check", game.id);
         }
 
         // 3. Extract (blocking work off the async runtime).
@@ -311,7 +342,9 @@ async fn install(app: &AppHandle, key: &str, game: &Game, build: ResolvedBuild, 
     }
     .await;
 
-    let _ = tokio::fs::remove_file(&zip_path).await;
+    if !keep_part {
+        let _ = tokio::fs::remove_file(&zip_path).await;
+    }
     if res.is_err() && staging.exists() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
@@ -323,6 +356,8 @@ async fn install(app: &AppHandle, key: &str, game: &Game, build: ResolvedBuild, 
 pub trait DownloadSink {
     fn set_total(&mut self, total: u64);
     fn add_bytes(&mut self, n: u64);
+    /// A resumed download already has `n` bytes (0: starting over).
+    fn resume_from(&mut self, n: u64);
     fn finished(&mut self) {}
 }
 
@@ -333,13 +368,81 @@ impl DownloadSink for Reporter {
     fn add_bytes(&mut self, n: u64) {
         self.bytes(n);
     }
+    fn resume_from(&mut self, n: u64) {
+        self.progress.downloaded = n;
+        self.emit();
+    }
     fn finished(&mut self) {
         self.progress.percent = Some(100.0);
         self.emit();
     }
 }
 
+/// Free space to leave on the drive after a download or install.
+const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
+/// Attempts per download when the connection drops (each resumes).
+const DOWNLOAD_ATTEMPTS: u32 = 4;
+/// Partial downloads older than this are deleted at startup.
+pub const PART_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Fail early, with a useful message, if `dir`'s drive can't take `needed`
+/// more bytes.
+pub fn ensure_space(dir: &Path, needed: u64) -> Result<()> {
+    // Check the nearest folder that exists.
+    let probe = dir.ancestors().find(|p| p.exists()).unwrap_or(dir);
+    let Ok(free) = fs4::available_space(probe) else {
+        return Ok(()); // Unknown: let the write itself fail if it must.
+    };
+    if free < needed.saturating_add(SPACE_MARGIN) {
+        return Err(Error::msg(format!(
+            "Not enough disk space: this needs about {} but only {} is free on the drive with {}. Free up some space and try again.",
+            crate::support::human_bytes(needed),
+            crate::support::human_bytes(free),
+            probe.display()
+        )));
+    }
+    Ok(())
+}
+
+fn sha_ok(expected: Option<&String>, digest: &str) -> bool {
+    expected.map_or(true, |e| e.trim().eq_ignore_ascii_case(digest))
+}
+
+/// Whether a failed download left something worth resuming.
+fn is_resumable(loc: &Location, part: &Path) -> bool {
+    matches!(loc, Location::Remote(_)) && std::fs::metadata(part).is_ok_and(|m| m.len() > 0)
+}
+
+/// Delete partial downloads of other versions of the same game.
+fn remove_other_parts(downloads: &Path, prefix: &str, keep: &Path) {
+    for e in std::fs::read_dir(downloads).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with(prefix) && e.path() != keep {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Errors worth retrying: the connection, not the server's answer.
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_body() || e.is_request() || e.is_decode()
+}
+
+/// The total size from a `Content-Range: bytes a-b/total` header, if the
+/// range starts at `offset`.
+fn content_range_total(resp: &reqwest::Response, offset: u64) -> Option<Option<u64>> {
+    let v = resp.headers().get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+    let (range, total) = v.strip_prefix("bytes ")?.split_once('/')?;
+    let start: u64 = range.split_once('-')?.0.trim().parse().ok()?;
+    (start == offset).then(|| total.trim().parse().ok())
+}
+
 /// Copy `loc` to `dest`, hashing as we go. Returns the hex sha256.
+///
+/// Web downloads resume: if `dest` already holds the start of the file it's
+/// continued with a `Range` request (falling back to a full download if the
+/// server doesn't support that), and a dropped connection is retried from
+/// where it stopped. Fails early if the drive is too full.
 pub async fn download(
     client: &reqwest::Client,
     loc: &Location,
@@ -347,31 +450,134 @@ pub async fn download(
     cancel: &AtomicBool,
     rep: &mut impl DownloadSink,
 ) -> Result<String> {
-    let mut file = tokio::fs::File::create(dest).await?;
-    let mut hasher = Sha256::new();
     let cancelled = || Error::msg("Cancelled");
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    let mut hasher = Sha256::new();
     match loc {
         Location::Remote(url) => {
-            let resp = client.get(url.clone()).send().await?.error_for_status()?;
-            if let Some(len) = resp.content_length() {
-                rep.set_total(len);
+            // Hash what's already there.
+            let mut offset = 0u64;
+            if let Ok(mut f) = tokio::fs::File::open(dest).await {
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let n = f.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    offset += n as u64;
+                }
             }
-            let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            if offset > 0 {
+                log::info!("resuming {url} from byte {offset}");
+                rep.resume_from(offset);
+            }
+
+            let mut failures = 0u32;
+            loop {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(cancelled());
                 }
-                let chunk = chunk?;
-                hasher.update(&chunk);
-                file.write_all(&chunk).await?;
-                rep.add_bytes(chunk.len() as u64);
+                let mut req = client.get(url.clone());
+                if offset > 0 {
+                    req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+                }
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) if is_transient(&e) && failures + 1 < DOWNLOAD_ATTEMPTS => {
+                        failures += 1;
+                        log::warn!("download of {url} failed ({e}); retrying ({failures})");
+                        tokio::time::sleep(Duration::from_secs(1 << failures)).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let status = resp.status();
+                if offset > 0 && status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                    // `bytes */<size>` equal to what we have: it's all here.
+                    let size = resp.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes */")).and_then(|t| t.trim().parse::<u64>().ok());
+                    if size == Some(offset) {
+                        rep.set_total(offset);
+                        break;
+                    }
+                    // Our partial file doesn't fit the server's: start over.
+                    log::warn!("server rejected resuming {url}; downloading it from the start");
+                    (offset, hasher) = (0, Sha256::new());
+                    rep.resume_from(0);
+                    let _ = tokio::fs::remove_file(dest).await;
+                    continue;
+                }
+                let resp = resp.error_for_status()?;
+                let ranged = offset > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+                let total = if ranged {
+                    match content_range_total(&resp, offset) {
+                        Some(t) => t,
+                        None => return Err(Error::msg("The server sent the wrong part of the file. Please try again.")),
+                    }
+                } else {
+                    if offset > 0 {
+                        // The server ignored the Range header: full body.
+                        (offset, hasher) = (0, Sha256::new());
+                        rep.resume_from(0);
+                    }
+                    resp.content_length()
+                };
+                if let Some(t) = total {
+                    rep.set_total(t);
+                    ensure_space(dir, t.saturating_sub(offset))?;
+                }
+                let mut file = if ranged {
+                    tokio::fs::OpenOptions::new().append(true).open(dest).await?
+                } else {
+                    tokio::fs::File::create(dest).await?
+                };
+
+                let mut stream = resp.bytes_stream();
+                let mut progressed = false;
+                let mut stream_err = None;
+                while let Some(chunk) = stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        file.flush().await?;
+                        return Err(cancelled());
+                    }
+                    match chunk {
+                        Ok(chunk) => {
+                            hasher.update(&chunk);
+                            file.write_all(&chunk).await?;
+                            offset += chunk.len() as u64;
+                            rep.add_bytes(chunk.len() as u64);
+                            progressed = true;
+                        }
+                        Err(e) => {
+                            stream_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                // Make sure what we have is on disk, to resume from.
+                file.flush().await?;
+                file.sync_data().await.ok();
+                match stream_err {
+                    None => break,
+                    Some(e) => {
+                        failures = if progressed { 0 } else { failures + 1 };
+                        if failures + 1 >= DOWNLOAD_ATTEMPTS || !is_transient(&e) {
+                            return Err(Error::msg(format!("The download was interrupted ({e}). Try again to continue where it stopped.")));
+                        }
+                        log::warn!("download of {url} interrupted at byte {offset} ({e}); resuming");
+                        tokio::time::sleep(Duration::from_secs(1 << failures)).await;
+                    }
+                }
             }
         }
         Location::Local(path) => {
             let mut src = tokio::fs::File::open(path)
                 .await
                 .map_err(|e| Error::msg(format!("Could not open {}: {e}", path.display())))?;
-            rep.set_total(src.metadata().await?.len());
+            let len = src.metadata().await?.len();
+            rep.set_total(len);
+            ensure_space(dir, len)?;
+            let mut file = tokio::fs::File::create(dest).await?;
             let mut buf = vec![0u8; 256 * 1024];
             loop {
                 if cancel.load(Ordering::Relaxed) {
@@ -385,9 +591,9 @@ pub async fn download(
                 file.write_all(&buf[..n]).await?;
                 rep.add_bytes(n as u64);
             }
+            file.flush().await?;
         }
     }
-    file.flush().await?;
     rep.finished();
     Ok(hex::encode(hasher.finalize()))
 }
@@ -396,6 +602,9 @@ pub fn extract(zip_path: &Path, dest: &Path, cancel: &AtomicBool, mut on_progres
     let mut archive = zip::ZipArchive::new(BufReader::new(File::open(zip_path)?))
         .map_err(|e| Error::msg(format!("The download is not a valid zip file ({e}).")))?;
     std::fs::create_dir_all(dest)?;
+    // Check there's room for everything before writing anything.
+    let unpacked = (0..archive.len()).filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.size())).fold(0u64, u64::saturating_add);
+    ensure_space(dest, unpacked)?;
     let total = archive.len();
     for i in 0..total {
         if cancel.load(Ordering::Relaxed) {
@@ -565,7 +774,7 @@ fn remove_builds(games_dir: &Path, builds: &[Installed]) {
     for b in builds {
         if b.path.starts_with(games_dir) && b.path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&b.path) {
-                eprintln!("couldn't remove {}: {e}", b.path.display());
+                log::warn!("couldn't remove {}: {e}", b.path.display());
             }
         }
     }
@@ -648,6 +857,92 @@ pub fn sanitize(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    struct NullSink(u64);
+    impl DownloadSink for NullSink {
+        fn set_total(&mut self, _: u64) {}
+        fn add_bytes(&mut self, n: u64) {
+            self.0 += n;
+        }
+        fn resume_from(&mut self, n: u64) {
+            self.0 = n;
+        }
+    }
+
+    /// A one-file HTTP server whose first response drops the connection
+    /// halfway; later requests honour `Range`. Returns the URL and the Range
+    /// headers it saw.
+    fn flaky_server(body: Vec<u8>) -> (String, std::sync::mpsc::Receiver<Option<String>>) {
+        use std::io::{BufRead, BufReader as StdBufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/game.zip", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (n, conn) in listener.incoming().enumerate() {
+                let mut conn = conn.unwrap();
+                let mut range = None;
+                let mut reader = StdBufReader::new(conn.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        range = Some(v.trim().trim_end_matches('-').to_string());
+                    }
+                }
+                tx.send(range.clone()).unwrap();
+                let len = body.len();
+                if n == 0 {
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+                    conn.write_all(head.as_bytes()).unwrap();
+                    conn.write_all(&body[..len / 2]).unwrap();
+                    // Drop the connection mid-body.
+                } else {
+                    let from: usize = range.as_deref().map_or(0, |r| r.parse().unwrap());
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{len}\r\nConnection: close\r\n\r\n",
+                        len - from,
+                        len - 1
+                    );
+                    conn.write_all(head.as_bytes()).unwrap();
+                    conn.write_all(&body[from..]).unwrap();
+                }
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn resumes_interrupted_downloads() {
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let (url, ranges) = flaky_server(body.clone());
+        let dir = std::env::temp_dir().join(format!("toybox-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("game.zip.part");
+        let _ = std::fs::remove_file(&dest);
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = reqwest::Client::new();
+        let loc = Location::parse(&url, None).unwrap();
+        let mut sink = NullSink(0);
+        let digest = rt.block_on(download(&client, &loc, &dest, &AtomicBool::new(false), &mut sink)).unwrap();
+
+        assert_eq!(digest, hex::encode(Sha256::digest(&body)));
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(sink.0, body.len() as u64);
+        assert_eq!(ranges.recv().unwrap(), None, "first request is a plain GET");
+        assert_eq!(ranges.recv().unwrap(), Some((body.len() / 2).to_string()), "second continues where the first stopped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_for_free_space() {
+        assert!(ensure_space(&std::env::temp_dir(), 1).is_ok());
+        let err = ensure_space(&std::env::temp_dir(), u64::MAX / 2).unwrap_err().to_string();
+        assert!(err.starts_with("Not enough disk space"), "{err}");
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("toybox-test-{name}-{}", std::process::id()));

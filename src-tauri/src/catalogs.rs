@@ -149,6 +149,14 @@ async fn load_source(st: &AppState, src: &Source) -> Outcome {
 
     match result {
         Ok((catalog, body)) => {
+            log::info!(
+                "catalog {} [{}]: {} ({} games, version {})",
+                catalog.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| src.display_name()),
+                src.id,
+                if body.is_some() { "updated" } else { "unchanged" },
+                catalog.games.len(),
+                catalog.version
+            );
             let validators = body.map(|(bytes, etag, last_modified)| {
                 let _ = write_atomic(&cache, &bytes);
                 (etag, last_modified)
@@ -164,6 +172,7 @@ async fn load_source(st: &AppState, src: &Source) -> Outcome {
             let previous = st.catalogs.read().unwrap().get(&src.id).and_then(|c| c.catalog.clone());
             let catalog = read_cache().or(previous);
             let error = Some(format!("Couldn't load {}: {err}", src.display_name()));
+            log::warn!("catalog [{}] <{}>: {err}{}", src.id, src.url, if catalog.is_some() { " (using the offline copy)" } else { "" });
             Outcome {
                 id: src.id.clone(),
                 state: CatalogState { offline: catalog.is_some(), catalog, location, fetched_at: src.fetched_at, error },

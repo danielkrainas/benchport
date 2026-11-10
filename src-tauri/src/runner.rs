@@ -70,7 +70,11 @@ pub fn launch(app: &AppHandle, id: &str, version: Option<&str>) -> Result<()> {
     };
     cmd.args(&installed.args).current_dir(&workdir);
 
-    let child = cmd.spawn().map_err(|e| Error::msg(format!("Couldn't start the game: {e}")))?;
+    let child = cmd.spawn().map_err(|e| {
+        log::error!("couldn't start {id} ({}): {e}", exe.display());
+        Error::msg(format!("Couldn't start the game: {e}"))
+    })?;
+    log::info!("started {id} v{}", installed.version);
     let child = Arc::new(Mutex::new(child));
     let started = now();
     st.running
@@ -103,6 +107,10 @@ fn finish_session(app: &AppHandle, id: &str, started: u64, exit_code: Option<i32
     let st = state(app);
     st.running.lock().unwrap().remove(id);
     let elapsed = now().saturating_sub(started);
+    match exit_code {
+        Some(0) | None => log::info!("{id} closed after {elapsed}s"),
+        Some(c) => log::warn!("{id} exited with code {c} after {elapsed}s"),
+    }
     let _ = st.update_library(app, |lib| {
         let e = lib.entry(id);
         e.playtime_secs += elapsed;

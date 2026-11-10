@@ -150,7 +150,7 @@ impl SourceList {
     pub fn load(path: &Path) -> SourceList {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                eprintln!("sources.json is corrupt ({e}); starting fresh");
+                log::warn!("sources.json is corrupt ({e}); starting fresh");
                 let _ = std::fs::rename(path, path.with_extension("json.corrupt"));
                 SourceList::default()
             }),

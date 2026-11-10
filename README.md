@@ -64,6 +64,7 @@ branded launcher instead:
    | `allowAddingCatalogs` | Let players add other catalogs (Settings, `toybox://` links). Defaults to `true` without a `catalogUrl` and `false` with one, so a branded launcher sticks to its catalog and ignores `toybox://` links unless you opt in. |
    | `keepBranding` | With `allowAddingCatalogs`, keep this `theme` even when several catalogs are added (by default the launcher switches to a neutral theme then). |
    | `rssUrl`, `updateUrl` | News feed and [launcher self-update](#updating-the-launcher-itself). Optional. |
+   | `updatePublicKey` | Only accept launcher updates signed with this key (see [Signed updates](#signed-updates)). Recommended whenever `updateUrl` is set. |
 
 2. In `src-tauri/tauri.conf.json`, change `productName` and `identifier`.
    The identifier decides where user data is stored, so give your fork its own.
@@ -129,7 +130,23 @@ only need a `playUrl` (see below). Everything else is optional:
 | `releaseNotes` | Plain text shown under "What's new". |
 | `size` | Download size in bytes (used before the download starts). |
 | `featured` | `true` puts the game in the home page spotlight. |
+| `feedbackUrl` | Where players report problems (see below). Defaults to the catalog's `supportUrl`. |
 | `platforms` | Per-OS overrides: `{ "windows": { "downloadUrl", "sha256", "executable", "args", "size" }, "macos": {…}, "linux": {…} }`. |
+
+### Report a problem
+
+When a game has a `feedbackUrl`, or its catalog has a `supportUrl`, the game page shows
+**Report a problem** (in the sidebar and the ⋯ menu). It opens that link pre-filled:
+
+- A **web page** can use placeholders, which are filled in URL-encoded:
+  `{game}`, `{gameId}`, `{version}` (the build the player has, else the catalog's),
+  `{catalog}`, `{launcherVersion}` and `{platform}` (e.g. `windows x86_64`). This works
+  with prefilled form links, for example Google Forms'
+  `https://docs.google.com/forms/d/e/…/viewform?entry.123={game}&entry.456={version}`.
+  A link without placeholders opens as-is.
+- A **`mailto:` link** gets a subject and a body with those details, unless it sets its own.
+
+Players can add more detail with **Settings → Help → Copy diagnostics** (below).
 
 ### Browser games
 
@@ -265,6 +282,7 @@ from a static `version.json`:
 | `minimumVersion` | *Optional.* Launchers older than this are **required** to update. Games can't be installed or played until they do. This is only enforced when the update can actually be installed, either automatically or via `page`. |
 | `platforms` | One build per OS: `linux`, `windows`, `macos`, or `<os>-<arch>` such as `macos-aarch64` (the more specific key wins). With no entry for its platform, a launcher isn't offered the update. |
 | `sha256` | **Required.** The launcher never replaces itself with unverified bytes. |
+| `version.json.sig` | *A separate file*, required when the launcher has `updatePublicKey` (see [Signed updates](#signed-updates)). |
 | `url` | The raw executable/AppImage, or a zip containing it (`executable` names it if it isn't called the same as the running file). On macOS it must be a zip containing the `.app` bundle. Relative URLs resolve against `version.json`. |
 | `notes`, `released` | Shown to the player. |
 | `page` | *Optional.* A manual download page, linked when the launcher can't update itself. |
@@ -287,6 +305,28 @@ python3 tools/publish-launcher.py path/to/version.json 0.2.0 \
 
 Bump `version` in `src-tauri/tauri.conf.json` (and `Cargo.toml`) before building. That's the version the launcher reports.
 
+### Signed updates
+
+A sha256 in `version.json` only proves the download matches `version.json`. Whoever can
+change files on your update host could change both. Signing closes that: with
+`"updatePublicKey"` in `launcher.json`, the launcher only accepts a `version.json` that comes
+with a valid Ed25519 signature in `version.json.sig` next to it, and refuses (and logs)
+anything else.
+
+```bash
+python3 tools/sign.py keygen ~/toybox-signing.key   # once; prints the public key
+# add the printed "updatePublicKey" to src-tauri/launcher.json, then for each release:
+python3 tools/sign.py sign path/to/version.json --key ~/toybox-signing.key
+# upload version.json and version.json.sig together
+```
+
+Keep the private key out of the repo and back it up. If it's lost, launchers with the
+old public key can't be updated automatically any more. The release workflow signs for
+you when the `LAUNCHER_SIGNING_KEY` secret is set:
+`gh secret set LAUNCHER_SIGNING_KEY < ~/toybox-signing.key`. To change keys, ship
+a release signed with the old key whose `launcher.json` has the new public key.
+`tools/sign.py` needs only Python's standard library.
+
 ### Building releases with GitHub Actions
 
 `.github/workflows/release.yml` does all of the above for every platform. Bump the
@@ -308,6 +348,7 @@ Intel), and opens a **draft release** containing:
 | `.dmg` | macOS installs |
 | `_macos_<arch>.app.zip` | macOS self-update artifacts |
 | `version.json` | The self-update manifest, already pointing at this release's files |
+| `version.json.sig` | Its signature, if the `LAUNCHER_SIGNING_KEY` secret is set |
 
 Check the draft and publish it. Launchers built with
 `"updateUrl": "https://github.com/<owner>/<repo>/releases/latest/download/version.json"`
@@ -329,6 +370,17 @@ show the update with a link to `page`. Debug builds never replace themselves; se
 
 ## How it behaves
 
+- **Interrupted downloads:** a dropped connection is retried, continuing where it
+  stopped (HTTP `Range`). If it still fails, the partial file is kept and **Retry**
+  continues it, even after a restart (partial downloads are kept for 7 days). Servers
+  without range support just start over. The sha256 check covers the whole file either way.
+- **Disk space:** before downloading, and again before unpacking, the launcher checks
+  there's room (plus a small margin) and says how much is needed, instead of failing halfway.
+- **Logs and diagnostics:** the launcher logs what it does (catalog checks, installs,
+  launches, game exit codes, and errors, including the UI's) to `toybox.log` in the
+  platform's log folder (1 MB, plus one older file). **Settings → Help** opens that
+  folder, and **Copy diagnostics** copies a plain-text report (versions, platform,
+  catalog status, installed games, recent log) for players to paste into a bug report.
 - **Offline:** each catalog's last good copy is cached separately, as is the news
   feed. Installed games stay playable, and a banner names any catalog that's offline.
 - **Safe installs:** the zip is downloaded and hashed, extracted to a staging folder
@@ -361,15 +413,16 @@ src-tauri/src/
   catalogs.rs   loading/refreshing every catalog, adding sources, toybox:// links
   catalog.rs    catalog model, per-platform build resolution
   location.rs   URL / local path handling, relative resolution
-  installer.rs  download → verify → extract → swap, auto-updates
-  selfupdate.rs launcher self-update from version.json
+  installer.rs  download (resumable) → verify → extract → swap, auto-updates, disk space
+  selfupdate.rs launcher self-update from version.json (optionally signed)
+  support.rs    log file, diagnostics report, "Report a problem" links
   runner.rs     launching games (processes + browser-game windows), play-time tracking
   library.rs    persisted library state
   news.rs       RSS/Atom parsing
   lib.rs        Tauri commands + app setup
 ui/             index.html, styles.css, js/ (app, views, store, util, icons)
 examples/       demo config + generator for two local demo catalogs
-tools/          publish.py (games), publish-launcher.py (launcher releases)
+tools/          publish.py (games), publish-launcher.py (launcher releases), sign.py (update signing)
 docs/           README screenshot
 .github/        release workflow (GitHub Actions)
 ```

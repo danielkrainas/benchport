@@ -130,7 +130,7 @@ impl Library {
                 Ok(lib) => lib,
                 Err(e) => {
                     // Keep the unreadable file around rather than silently losing it.
-                    eprintln!("library.json is corrupt ({e}); starting fresh");
+                    log::warn!("library.json is corrupt ({e}); starting fresh");
                     let _ = std::fs::rename(path, path.with_extension("json.corrupt"));
                     Library::default()
                 }

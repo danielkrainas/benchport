@@ -49,6 +49,11 @@ pub struct LauncherConfig {
     /// Where the launcher's own `version.json` lives (enables self-update).
     #[serde(default)]
     pub update_url: Option<String>,
+    /// Ed25519 public key (base64) that `version.json` must be signed with
+    /// (`version.json.sig`, made by tools/sign.py). Without it, updates are
+    /// only checked against the sha256 in version.json.
+    #[serde(default)]
+    pub update_public_key: Option<String>,
     #[serde(default)]
     pub keep_branding: bool,
     #[serde(default)]

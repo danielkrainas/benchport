@@ -37,6 +37,12 @@
 //! The new build is downloaded and staged in the background, then swapped in
 //! either when the user clicks "Restart" or automatically when the launcher
 //! exits.
+//!
+//! With `"updatePublicKey"` in launcher.json, `version.json` must come with a
+//! valid Ed25519 signature in `version.json.sig` (base64, made by
+//! `tools/sign.py`). Since the manifest carries each build's sha256, that
+//! covers the builds too: someone who can change files on the update host,
+//! but doesn't have the signing key, can't push a launcher to players.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -304,8 +310,19 @@ pub async fn check(app: &AppHandle, auto_download: bool) -> Result<Status> {
         u.status.source = Some(loc.display());
     });
 
+    let public_key = st.config.read().unwrap().config.update_public_key.clone().filter(|k| !k.trim().is_empty());
     let fetched = async {
         let bytes = loc.fetch(&st.client).await?;
+        match &public_key {
+            Some(key) => {
+                let sig = signature_location(&loc)
+                    .fetch(&st.client)
+                    .await
+                    .map_err(|e| Error::msg(format!("The launcher update isn't signed, so it won't be installed (couldn't get version.json.sig: {e})")))?;
+                verify_manifest(key, &bytes, &sig)?;
+            }
+            None => log::info!("launcher updates aren't signature-checked (no updatePublicKey in the config)"),
+        }
         serde_json::from_slice::<Manifest>(&bytes).map_err(|e| Error::msg(format!("version.json is invalid: {e}")))
     }
     .await;
@@ -362,6 +379,48 @@ pub async fn check(app: &AppHandle, auto_download: bool) -> Result<Status> {
     Ok(status(app))
 }
 
+/// `version.json.sig` next to `version.json`.
+fn signature_location(loc: &Location) -> Location {
+    match loc {
+        Location::Remote(u) => {
+            let mut u = u.clone();
+            let path = format!("{}.sig", u.path());
+            u.set_path(&path);
+            Location::Remote(u)
+        }
+        Location::Local(p) => {
+            let mut s = p.clone().into_os_string();
+            s.push(".sig");
+            Location::Local(s.into())
+        }
+    }
+}
+
+/// Check `manifest` against a base64 Ed25519 signature (`sig_file`, the
+/// contents of version.json.sig) and `public_key` (base64).
+pub fn verify_manifest(public_key: &str, manifest: &[u8], sig_file: &[u8]) -> Result<()> {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let key: [u8; 32] = b64
+        .decode(public_key.trim())
+        .ok()
+        .and_then(|k| k.try_into().ok())
+        .ok_or_else(|| Error::msg("updatePublicKey in launcher.json isn't a valid key (expected base64 of 32 bytes)."))?;
+    let key = VerifyingKey::from_bytes(&key).map_err(|_| Error::msg("updatePublicKey in launcher.json isn't a valid key."))?;
+    let text = String::from_utf8_lossy(sig_file);
+    let line = text.lines().map(str::trim).rfind(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or("");
+    let sig: [u8; 64] = b64
+        .decode(line)
+        .ok()
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| Error::msg("version.json.sig isn't a valid signature file."))?;
+    key.verify_strict(manifest, &Signature::from_bytes(&sig)).map_err(|_| {
+        log::error!("version.json failed signature verification");
+        Error::msg("The launcher update failed its signature check, so it won't be installed. It may have been tampered with.")
+    })
+}
+
 /// Why the running launcher can't replace itself with this manifest's build.
 fn why_blocked(m: &Manifest) -> Option<String> {
     if m.artifact().is_none() {
@@ -386,6 +445,9 @@ impl DownloadSink for Sink<'_> {
             self.last = std::time::Instant::now();
             with(self.app, |_| {});
         }
+    }
+    fn resume_from(&mut self, n: u64) {
+        with(self.app, |u| u.status.downloaded = n);
     }
 }
 
@@ -437,6 +499,7 @@ pub async fn download(app: &AppHandle) -> Result<()> {
 
     match res {
         Ok(staged) => {
+            log::info!("launcher update {} downloaded; it installs on restart", manifest.version);
             with(app, |u| {
                 u.staged = Some((manifest.version.clone(), staged));
                 u.status.phase = Phase::Ready;
@@ -444,6 +507,7 @@ pub async fn download(app: &AppHandle) -> Result<()> {
             Ok(())
         }
         Err(e) => {
+            log::error!("downloading launcher update {} failed: {e}", manifest.version);
             let _ = tokio::fs::remove_dir_all(&dir).await;
             with(app, |u| {
                 u.status.phase = Phase::Error;
@@ -682,7 +746,7 @@ pub fn apply_on_exit(app: &AppHandle) {
             Ok(_) => {
                 let _ = std::fs::remove_dir_all(state(app).paths.data.join("launcher-update"));
             }
-            Err(e) => eprintln!("launcher update on exit failed: {e}"),
+            Err(e) => log::warn!("launcher update on exit failed: {e}"),
         }
     }
 }
@@ -690,6 +754,29 @@ pub fn apply_on_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Made with tools/sign.py from the seed bytes 0..32.
+    const PUB: &str = "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=";
+    const SIG: &str = "4oaVgKs2izxbnTLAlT2pkh6LvzAus0oA3bWnFEqhj2bKngQoQM8xELlSobUw7kyHkchxzQ54MVi3PuJKqrk6AQ==";
+    const MSG: &[u8] = b"{\"version\":\"9.9.9\"}\n";
+
+    #[test]
+    fn verifies_signed_manifests() {
+        verify_manifest(PUB, MSG, format!("{SIG}\n").as_bytes()).unwrap();
+        verify_manifest(PUB, MSG, format!("# comment\n{SIG}").as_bytes()).unwrap();
+        let tampered = b"{\"version\":\"9.9.8\"}\n";
+        assert!(verify_manifest(PUB, tampered, SIG.as_bytes()).unwrap_err().to_string().contains("signature check"));
+        assert!(verify_manifest(PUB, MSG, b"not base64").is_err());
+        assert!(verify_manifest("AAAA", MSG, SIG.as_bytes()).unwrap_err().to_string().contains("updatePublicKey"));
+    }
+
+    #[test]
+    fn signature_sits_next_to_the_manifest() {
+        let l = Location::parse("https://github.com/o/r/releases/latest/download/version.json", None).unwrap();
+        assert_eq!(signature_location(&l).display(), "https://github.com/o/r/releases/latest/download/version.json.sig");
+        let l = Location::parse("https://cdn.example/v.json?x=1", None).unwrap();
+        assert_eq!(signature_location(&l).display(), "https://cdn.example/v.json.sig?x=1");
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("toybox-su-{name}-{}", std::process::id()));
